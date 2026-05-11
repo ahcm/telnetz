@@ -2,6 +2,11 @@
 name = "telnetz"
 version = "0.1.0"
 edition = "2024"
+authors = ["Andreas Hauser <andreas.github@icloud.com>"]
+description = "telnet like commandline tool for connecting to TCP socketsa"
+license = "EUPL-1.2"
+keywords = ["telnet", "socket", "CLI", "network"]
+repository = "https://github.com/ahcm/telnetz"
 
 [dependencies]
 rustyline = "18"
