@@ -1,6 +1,6 @@
 [package]
 name = "telnetz"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Andreas Hauser <andreas.github@icloud.com>"]
 description = "telnet like commandline tool for connecting to TCP and TLS sockets"
