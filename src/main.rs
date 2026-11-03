@@ -1,9 +1,12 @@
 use std::env;
 use std::error::Error;
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use tokio::io::{self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -23,6 +26,9 @@ struct Config {
     port: u16,
     tls: bool,
     insecure: bool,
+    no_default_ca: bool,
+    ca_certs: Vec<PathBuf>,
+    dump_cert: Option<PathBuf>,
     commands: Vec<String>,
     expect: Option<String>,
     idle_timeout: Option<Duration>,
@@ -39,6 +45,11 @@ fn print_usage() {
          Options:\n\
            --tls                  Use TLS for the connection.\n\
            --insecure             Skip certificate validation (TLS only).\n\
+           --no-default-ca        Ignore bundled CA certificates (TLS only).\n\
+           --cacert <FILE>        Trust extra PEM/DER certificates (TLS only;\n\
+                                  repeatable).\n\
+           --dump-cert <FILE>     Save unverified server PEM and exit (TLS only).\n\
+                                  Use - for stdout; existing files are preserved.\n\
            -c, --command <LINE>   Send LINE (repeatable); stdin is not read.\n\
            --expect <TEXT>        Exit 0 as soon as TEXT appears in the output,\n\
                                   exit 3 if the connection ends without it.\n\
@@ -71,6 +82,9 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
     let mut port: Option<u16> = None;
     let mut tls = false;
     let mut insecure = false;
+    let mut no_default_ca = false;
+    let mut ca_certs = Vec::new();
+    let mut dump_cert = None;
     let mut commands = Vec::new();
     let mut expect = None;
     let mut idle_timeout = None;
@@ -81,10 +95,16 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
-        let mut value = |flag: &str| args.next().ok_or_else(|| format!("{flag} requires a value"));
+        let mut value = |flag: &str| {
+            args.next()
+                .ok_or_else(|| format!("{flag} requires a value"))
+        };
         match arg.as_str() {
             "--tls" => tls = true,
             "--insecure" => insecure = true,
+            "--no-default-ca" => no_default_ca = true,
+            "--cacert" => ca_certs.push(PathBuf::from(value(&arg)?)),
+            "--dump-cert" => dump_cert = Some(PathBuf::from(value(&arg)?)),
             "-c" | "--command" => commands.push(value(&arg)?),
             "--expect" => expect = Some(value(&arg)?).filter(|s| !s.is_empty()),
             "-w" | "--timeout" => idle_timeout = Some(parse_secs(&arg, &value(&arg)?)?),
@@ -117,12 +137,34 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
     if insecure && !tls {
         return Err("--insecure requires --tls".into());
     }
+    if no_default_ca && !tls {
+        return Err("--no-default-ca requires --tls".into());
+    }
+    if !ca_certs.is_empty() {
+        if !tls {
+            return Err("--cacert requires --tls".into());
+        }
+        if insecure {
+            return Err("--cacert cannot be used with --insecure".into());
+        }
+    }
+    if dump_cert.is_some() {
+        if !tls {
+            return Err("--dump-cert requires --tls".into());
+        }
+        if !ca_certs.is_empty() || !commands.is_empty() || expect.is_some() {
+            return Err("--dump-cert cannot be used with --cacert, --command, or --expect".into());
+        }
+    }
 
     Ok(Config {
         host,
         port,
         tls,
         insecure,
+        no_default_ca,
+        ca_certs,
+        dump_cert,
         commands,
         expect,
         idle_timeout,
@@ -133,21 +175,42 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
     })
 }
 
-async fn connect(config: &Config) -> Result<DynStream, Box<dyn Error>> {
-    let stream = TcpStream::connect((config.host.as_str(), config.port)).await?;
-
-    if !config.tls {
-        return Ok(Box::new(stream));
+fn load_ca_certificates(
+    root_store: &mut rustls::RootCertStore,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let contents = std::fs::read(path)
+        .map_err(|err| format!("Cannot read certificate file {}: {err}", path.display()))?;
+    let mut certs = CertificateDer::pem_slice_iter(&contents)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Invalid certificate file {}: {err}", path.display()))?;
+    if certs.is_empty() {
+        certs.push(CertificateDer::from(contents));
     }
+    for cert in certs {
+        root_store
+            .add(cert)
+            .map_err(|err| format!("Invalid certificate in {}: {err}", path.display()))?;
+    }
+    Ok(())
+}
 
-    let client_config = if config.insecure {
+async fn connect_tls(
+    config: &Config,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error>> {
+    let client_config = if config.insecure || config.dump_cert.is_some() {
         rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(NoVerifier::new())
             .with_no_client_auth()
     } else {
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if !config.no_default_ca {
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        for path in &config.ca_certs {
+            load_ca_certificates(&mut root_store, path)?;
+        }
         rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth()
@@ -156,9 +219,58 @@ async fn connect(config: &Config) -> Result<DynStream, Box<dyn Error>> {
     let connector = TlsConnector::from(std::sync::Arc::new(client_config));
     let server_name = rustls::pki_types::ServerName::try_from(config.host.clone())
         .map_err(|_| "Invalid DNS name for TLS")?;
-    let tls_stream = connector.connect(server_name, stream).await?;
+    let stream = TcpStream::connect((config.host.as_str(), config.port)).await?;
+    Ok(connector.connect(server_name, stream).await?)
+}
 
-    Ok(Box::new(tls_stream))
+async fn connect(config: &Config) -> Result<DynStream, Box<dyn Error>> {
+    if config.tls {
+        Ok(Box::new(connect_tls(config).await?))
+    } else {
+        Ok(Box::new(TcpStream::connect((config.host.as_str(), config.port)).await?))
+    }
+}
+
+async fn dump_certificate(config: &Config, path: &Path) -> Result<u8, Box<dyn Error>> {
+    let mut stream = tokio::time::timeout(config.connect_timeout, connect_tls(config))
+        .await
+        .map_err(|_| format!("connect to {}:{} timed out", config.host, config.port))??;
+    let certificate = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .ok_or("Server did not provide a certificate")?;
+    let encoded = STANDARD.encode(certificate.as_ref());
+    let mut pem = b"-----BEGIN CERTIFICATE-----\n".to_vec();
+    for line in encoded.as_bytes().chunks(64) {
+        pem.extend_from_slice(line);
+        pem.push(b'\n');
+    }
+    pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    let _ = stream.shutdown().await;
+
+    let write_result = async {
+        let mut output: Box<dyn AsyncWrite + Unpin> = if path == Path::new("-") {
+            Box::new(io::stdout())
+        } else {
+            Box::new(
+                tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .await?,
+            )
+        };
+        output.write_all(&pem).await?;
+        output.flush().await
+    }
+    .await;
+    write_result.map_err(|err| format!("Cannot write certificate to {}: {err}", path.display()))?;
+    if !config.quiet {
+        eprintln!("Saved unverified server certificate to {}.", path.display());
+    }
+    Ok(0)
 }
 
 #[derive(Debug)]
@@ -166,9 +278,9 @@ struct NoVerifier(std::sync::Arc<rustls::crypto::CryptoProvider>);
 
 impl NoVerifier {
     fn new() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self(std::sync::Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        )))
+        std::sync::Arc::new(Self(
+            std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        ))
     }
 }
 
@@ -297,7 +409,11 @@ struct Matcher {
 impl Matcher {
     fn feed(&mut self, chunk: &[u8]) -> bool {
         self.window.extend_from_slice(chunk);
-        if self.window.windows(self.pattern.len()).any(|w| w == self.pattern) {
+        if self
+            .window
+            .windows(self.pattern.len())
+            .any(|w| w == self.pattern)
+        {
             return true;
         }
         let keep = self.pattern.len() - 1;
@@ -309,6 +425,9 @@ impl Matcher {
 }
 
 async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
+    if let Some(path) = &config.dump_cert {
+        return dump_certificate(&config, path).await;
+    }
     let stream = tokio::time::timeout(config.connect_timeout, connect(&config))
         .await
         .map_err(|_| format!("connect to {}:{} timed out", config.host, config.port))??;
@@ -385,7 +504,11 @@ async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
     }
 
     let _ = write_half.shutdown().await;
-    Ok(if matcher.is_some() { EXIT_EXPECT_FAILED } else { 0 })
+    Ok(if matcher.is_some() {
+        EXIT_EXPECT_FAILED
+    } else {
+        0
+    })
 }
 
 #[tokio::main]

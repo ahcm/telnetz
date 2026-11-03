@@ -22,6 +22,9 @@ Server output goes to stdout. Status and errors go to stderr.
 |---|---|
 | `--tls` | TLS with webpki roots; SNI is the host name |
 | `--insecure` | Skip certificate verification (needs `--tls`) |
+| `--no-default-ca` | Ignore bundled CAs; verified TLS trusts only `--cacert` files (needs `--tls`) |
+| `--cacert <FILE>` | Add trusted PEM/DER certificates; repeatable, needs `--tls`, conflicts with `--insecure` |
+| `--dump-cert <FILE>` | Fetch unverified leaf certificate as PEM and exit; needs `--tls`; `-` writes stdout; preserves existing files |
 | `-c, --command <LINE>` | Send LINE; repeatable, sent in order right after connecting |
 | `--expect <TEXT>` | Exit 0 once TEXT appears in the output; exit 3 if the connection ends first |
 | `-w, --timeout <SECS>` | Stop after SECS with no traffic (fractions allowed) |
@@ -48,6 +51,16 @@ telnetz -q --expect '220' -w 5 mail.example.com 25
 # HTTP request over TLS; the server closes after the response
 telnetz -q --tls -w 5 -c 'GET / HTTP/1.1' -c 'Host: example.com' -c 'Connection: close' -c '' example.com 443
 
+# Obtain a self-signed server certificate; compare its fingerprint through a trusted channel
+telnetz -q --tls --dump-cert server.crt localhost 8443
+openssl x509 -in server.crt -noout -fingerprint -sha256
+
+# Trust the checked server certificate
+telnetz -q --tls --cacert server.crt --expect ready -w 5 localhost 8443
+
+# Trust only the checked server certificate
+telnetz -q --tls --no-default-ca --cacert server.crt --expect ready -w 5 localhost 8443
+
 # Redis
 telnetz -q -w 1 -c PING -c 'INFO server' localhost 6379
 
@@ -67,5 +80,9 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
   For protocols that reject pipelining, run one command per invocation or pace a stdin pipe
   (`{ echo A; sleep 1; echo B; } | telnetz ...`).
 - `--expect` stops at the read that contains the text. Output after it is not printed.
-- `--insecure` is for self-signed test servers only.
+- Use `--cacert server.crt` for self-signed servers; hostname and expiry checks still apply.
+- Add `--no-default-ca` to exclude bundled CAs. With verification enabled and no `--cacert`, all server certificates are rejected.
+- `--dump-cert` skips trust, hostname, and expiry checks and sends no application data.
+  It cannot be combined with `--cacert`, `--command`, or `--expect`.
+- `--insecure` skips certificate verification; it is for test servers only.
 - Interactive mode (a human at a terminal) is used only when stdin is a TTY and no `-c` is given.
