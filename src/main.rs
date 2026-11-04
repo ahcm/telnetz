@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
 
 mod report;
+mod tls_info;
 use report::Report;
 
 trait StreamLike: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -34,6 +35,7 @@ struct Config {
     no_default_ca: bool,
     ca_certs: Vec<PathBuf>,
     dump_cert: Option<PathBuf>,
+    tls_info: bool,
     commands: Vec<String>,
     expect: Option<String>,
     idle_timeout: Option<Duration>,
@@ -60,6 +62,7 @@ fn print_usage() {
                                   repeatable).\n\
            --dump-cert <FILE>     Save unverified server PEM and exit (TLS only).\n\
                                   Use - for stdout; existing files are preserved.\n\
+           --tls-info             Inspect TLS and certificates, then exit.\n\
            -c, --command <LINE>   Send LINE (repeatable); stdin is not read.\n\
            --expect <TEXT>        Exit 0 as soon as TEXT appears in the output,\n\
                                   exit 3 if the connection ends without it.\n\
@@ -100,6 +103,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let mut no_default_ca = false;
     let mut ca_certs = Vec::new();
     let mut dump_cert = None;
+    let mut tls_info = false;
     let mut commands = Vec::new();
     let mut expect = None;
     let mut idle_timeout = None;
@@ -125,6 +129,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
             "--no-default-ca" => no_default_ca = true,
             "--cacert" => ca_certs.push(PathBuf::from(value(&arg)?)),
             "--dump-cert" => dump_cert = Some(PathBuf::from(value(&arg)?)),
+            "--tls-info" => tls_info = true,
             "-c" | "--command" => commands.push(value(&arg)?),
             "--expect" => expect = Some(value(&arg)?).filter(|s| !s.is_empty()),
             "-w" | "--timeout" => idle_timeout = Some(parse_secs(&arg, &value(&arg)?)?),
@@ -166,6 +171,14 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let host = host.ok_or("Missing host")?;
     let port = port.ok_or("Missing port")?;
 
+    if tls_info {
+        if !tls {
+            return Err("--tls-info requires --tls".into());
+        }
+        if dump_cert.is_some() || !commands.is_empty() || expect.is_some() {
+            return Err("--tls-info cannot be used with --dump-cert, --command, or --expect".into());
+        }
+    }
     if let Some(name) = &server_name {
         if !tls {
             return Err("--server-name requires --tls".into());
@@ -212,6 +225,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
         no_default_ca,
         ca_certs,
         dump_cert,
+        tls_info,
         commands,
         expect,
         idle_timeout,
@@ -277,7 +291,14 @@ async fn connect_tls(
         .map_err(|_| "Invalid DNS name for TLS")?;
     let stream = connect_tcp(config, report).await?;
     report.phase = "tls";
-    Ok(connector.connect(server_name, stream).await?)
+    let stream = connector.connect(server_name, stream).await?;
+    if config.json || config.tls_info {
+        report.tls = Some(tls_info::inspect(
+            stream.get_ref().1,
+            !config.insecure && config.dump_cert.is_none(),
+        ));
+    }
+    Ok(stream)
 }
 
 async fn connect_tcp(config: &Config, report: &mut Report) -> Result<TcpStream, Box<dyn Error>> {
@@ -346,6 +367,24 @@ async fn dump_certificate(
         eprintln!("Saved unverified server certificate to {}.", path.display());
     }
     Ok(report.finish(0, "certificate_dumped"))
+}
+
+async fn inspect_tls(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>> {
+    let mut stream = tokio::time::timeout(config.connect_timeout, connect_tls(config, report))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "connect/handshake timed out")
+        })??;
+    let _ = stream.shutdown().await;
+    if !config.json {
+        report.phase = "output";
+        let mut bytes = serde_json::to_vec_pretty(&report.tls)?;
+        bytes.push(b'\n');
+        let mut output = io::stdout();
+        output.write_all(&bytes).await?;
+        output.flush().await?;
+    }
+    Ok(report.finish(0, "tls_info"))
 }
 
 #[derive(Debug)]
@@ -500,6 +539,9 @@ impl Matcher {
 }
 
 async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>> {
+    if config.tls_info {
+        return inspect_tls(config, report).await;
+    }
     if let Some(path) = &config.dump_cert {
         return dump_certificate(config, path, report).await;
     }

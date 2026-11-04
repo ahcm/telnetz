@@ -21,7 +21,8 @@ printf 'GET / HTTP/1.0\r\n\r\n' | telnetz -q --raw -w 5 example.com 80
 handshake, and blocked reads/writes. `--max-bytes <positive integer>` limits
 received application bytes. Reaching either limit exits 4. An `--expect` match
 within the byte limit succeeds, including at the exact boundary. Certificate
-exports do not receive application bytes, so their output is outside the byte cap.
+exports and TLS inspection do not receive application bytes, so their output is
+outside the byte cap.
 
 Exit codes: 0 ok, 1 connection/IO error, 2 usage error, 3 `--expect` not seen,
 4 hard limit reached.
@@ -84,6 +85,24 @@ telnetz 127.0.0.1 8443 --tls --server-name service.example --cacert server.crt
 ```
 
 JSON results include the effective TLS `server_name` separately from `peer_addr`.
+
+`--tls-info` completes a verified TLS handshake, prints certificate and connection
+metadata as JSON, and exits without reading stdin or sending application data.
+Use `--json` to include it under `tls` in the full session result instead. Regular
+`--json --tls` sessions also include TLS metadata. The TLS object reports
+`protocol_version`, `cipher_suite`, `verification`, and the server's presented
+`certificates` in leaf-first order. Certificate fields include SHA-256 fingerprints,
+subject, issuer, serial number, typed SANs, UTC validity dates, Unix timestamps,
+and expiry/not-yet-valid flags. Metadata decoding errors appear as `parse_error`
+without changing the connection's verification result.
+
+```sh
+telnetz localhost 8443 --tls --cacert server.crt --tls-info --json --max-time 3
+```
+
+For an untrusted or expired server, explicitly use `--insecure` to inspect it;
+the result reports `verification: "skipped"`. `--tls-info` requires `--tls` and
+cannot be combined with `--dump-cert`, `--command`, or `--expect`.
 
 `--shutdown-write` closes the sending side after all `-c` commands or piped input
 have been sent, including empty stdin. It continues receiving replies until EOF,

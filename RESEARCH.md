@@ -19,7 +19,7 @@
 - `--connect-timeout` bounds TCP connection establishment and the TLS handshake.
 - Output files are created after a successful handshake, with exclusive creation. Existing files are preserved.
 - Exported certificates require identity verification through a trusted channel before use with `--cacert`.
-- PEM encoding uses `base64` 0.22 with 64-character lines and a trailing newline.
+- PEM encoding uses `base64` 0.23 with 64-character lines and a trailing newline.
 
 # Agent execution limits
 
@@ -47,7 +47,19 @@
 - Reading continues after shutdown. The default behavior still keeps the sending side open at input EOF.
 - Tests cover commands, normalized lines, raw binary input, empty input, opt-in behavior, and a TLS peer that replies after EOF.
 
+# TLS inspection
+
+- `--tls-info` returns negotiated protocol/cipher and metadata for the server's presented certificate chain, then exits.
+- Verification stays enabled by default. Explicit `--insecure` is reported as skipped verification.
+- SHA-256 fingerprints use `sha2`; certificate names, SANs, and validity use `x509-cert`.
+- Metadata parse failures are reported per certificate, independently of handshake verification.
+- Tests compare fingerprints with Python hashlib and validity timestamps with OpenSSL output.
+- Inspection tests cover TLS 1.2/1.3, typed DNS/IPv4/IPv6/URI/email SANs, chain order, expired certificates, and open stdin with no application data.
+
 ## Verification
+
+All 14 agent/TCP tests and 21 TLS tests pass. Cargo tests, Clippy with warnings
+denied, formatting, and whitespace checks pass.
 
 ```sh
 cargo build --offline
@@ -60,7 +72,7 @@ git diff --check
 ```
 
 The Python suite requires OpenSSL and loopback socket access. It generates temporary
-certificates and runs thirteen tests covering imports, export/import round trips,
+certificates and tests imports, export/import round trips,
 stdout export, untrusted and expired certificates, hostname mismatches, invalid
 files and options, preserved output files, failed connections, no application data,
 open stdin, and the existing `--insecure` mode. Set `TELNETZ_BIN` to test a different build.

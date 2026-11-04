@@ -1,6 +1,7 @@
 """Run after cargo build. Requires Python 3 and openssl; TELNETZ_BIN overrides the binary."""
 
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,9 +19,11 @@ BINARY = Path(os.environ.get("TELNETZ_BIN", ROOT / "target/debug/telnetz")).reso
 
 
 @contextlib.contextmanager
-def tls_server(cert, key, received=None, send_banner=True, server_names=None, action=None):
+def tls_server(cert, key, received=None, send_banner=True, server_names=None, action=None, tls_version=None):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
+    if tls_version is not None:
+        context.minimum_version = context.maximum_version = tls_version
     if server_names is not None:
         context.set_servername_callback(lambda connection, name, context: server_names.put(name))
 
@@ -56,12 +59,15 @@ class CertificateTests(unittest.TestCase):
         stack = contextlib.ExitStack()
         cls.addClassCleanup(stack.close)
         cls.directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="telnetz-tls-")))
-        for name in ("server", "other"):
+        for name in ("server", "other", "inspect"):
+            names = "DNS:localhost"
+            if name == "inspect":
+                names += ",IP:127.0.0.1,IP:2001:db8::1,URI:spiffe://local/service,email:agent@example.test"
             subprocess.run(
                 [
                     "openssl", "req", "-x509", "-newkey", "ec",
                     "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "2",
-                    "-subj", f"/CN={name}", "-addext", "subjectAltName=DNS:localhost",
+                    "-subj", f"/CN={name}", "-addext", f"subjectAltName={names}",
                     "-addext", "basicConstraints=critical,CA:FALSE",
                     "-keyout", str(cls.directory / f"{name}.key"),
                     "-out", str(cls.directory / f"{name}.crt"),
@@ -184,6 +190,19 @@ class CertificateTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1, result.stderr.decode())
                     self.assertIn(b"certificate expired", result.stderr)
             dumped = self.client("--tls", "--dump-cert", "-", port=port, expect=None)
+            verified_info = self.client(
+                "--tls", "--tls-info", "--cacert", expired, "--json", port=port, expect=None,
+            )
+            self.assertEqual(verified_info.returncode, 1)
+            self.assertEqual(json.loads(verified_info.stdout)["reason"], "certificate_expired")
+            skipped_info = self.client(
+                "--tls", "--tls-info", "--insecure", "--json", port=port, expect=None,
+            )
+            self.assertEqual(skipped_info.returncode, 0, skipped_info.stderr)
+            info = json.loads(skipped_info.stdout)["tls"]
+            self.assertEqual(info["verification"], "skipped")
+            self.assertTrue(info["certificates"][0]["expired"])
+            self.assertEqual(info["certificates"][0]["not_after_unix"], 1609459200)
         self.assertEqual(dumped.returncode, 0, dumped.stderr.decode())
         self.assertEqual(
             ssl.PEM_cert_to_DER_cert(dumped.stdout.decode()),
@@ -227,6 +246,79 @@ class CertificateTests(unittest.TestCase):
                     if process.poll() is None:
                         process.kill()
 
+    def test_tls_info_does_not_read_stdin_or_send_application_data(self):
+        received = queue.Queue()
+        with tls_server(self.cert, self.key, received=received, send_banner=False) as port:
+            with subprocess.Popen(
+                [str(BINARY), "localhost", str(port), "--tls", "--tls-info", "--cacert", str(self.cert)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ) as process:
+                try:
+                    process.stdin.write(b"unsent input\n")
+                    process.stdin.flush()
+                    self.assertEqual(process.wait(timeout=5), 0)
+                    info = json.loads(process.stdout.read())
+                    self.assertEqual(info["verification"], "verified")
+                    self.assertEqual(process.stderr.read(), b"")
+                    self.assertEqual(received.get(timeout=3), b"")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+
+    def test_tls_info_metadata(self):
+        cert = self.directory / "inspect.crt"
+        key = self.directory / "inspect.key"
+        der = ssl.PEM_cert_to_DER_cert(cert.read_text())
+        fingerprint = ":".join(f"{byte:02X}" for byte in hashlib.sha256(der).digest())
+        dates = subprocess.run(
+            ["openssl", "x509", "-in", str(cert), "-noout", "-startdate", "-enddate"],
+            check=True, capture_output=True, text=True,
+        ).stdout.splitlines()
+        before, after = (int(ssl.cert_time_to_seconds(line.split("=", 1)[1])) for line in dates)
+        for version, expected in ((ssl.TLSVersion.TLSv1_2, "TLSv1_2"), (ssl.TLSVersion.TLSv1_3, "TLSv1_3")):
+            with self.subTest(version=expected):
+                with tls_server(cert, key, tls_version=version) as port:
+                    result = self.client("--tls", "--tls-info", "--cacert", cert, "--json", port=port, expect=None)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, b"")
+                report = json.loads(result.stdout)
+                self.assertEqual(report["reason"], "tls_info")
+                self.assertEqual(report["bytes_received"], 0)
+                self.assertEqual(report["bytes_sent"], 0)
+                info = report["tls"]
+                self.assertEqual(info["protocol_version"], expected)
+                self.assertTrue(info["cipher_suite"])
+                self.assertEqual(info["verification"], "verified")
+                leaf = info["certificates"][0]
+                self.assertIsNone(leaf["parse_error"])
+                self.assertEqual(leaf["sha256_fingerprint"], fingerprint)
+                self.assertEqual(leaf["subject"], "CN=inspect")
+                self.assertEqual(leaf["issuer"], "CN=inspect")
+                self.assertEqual(leaf["not_before_unix"], before)
+                self.assertEqual(leaf["not_after_unix"], after)
+                self.assertFalse(leaf["expired"])
+                self.assertFalse(leaf["not_yet_valid"])
+                names = {(entry["type"], entry["value"]) for entry in leaf["subject_alt_names"]}
+                self.assertEqual(names, {
+                    ("DNS", "localhost"), ("IP", "127.0.0.1"), ("IP", "2001:db8::1"),
+                    ("URI", "spiffe://local/service"), ("email", "agent@example.test"),
+                })
+
+    def test_tls_info_verification_and_chain(self):
+        untrusted = self.client("--tls", "--tls-info", "--json", expect=None)
+        self.assertEqual(untrusted.returncode, 1)
+        self.assertEqual(json.loads(untrusted.stdout)["reason"], "unknown_issuer")
+        skipped = self.client("--tls", "--tls-info", "--insecure", "--json", expect=None)
+        self.assertEqual(skipped.returncode, 0)
+        self.assertEqual(json.loads(skipped.stdout)["tls"]["verification"], "skipped")
+        chain = self.directory / "server-chain.pem"
+        chain.write_bytes(self.cert.read_bytes() + self.other.read_bytes())
+        with tls_server(chain, self.key) as port:
+            result = self.client("--tls", "--tls-info", "--cacert", self.cert, "--json", port=port, expect=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        certificates = json.loads(result.stdout)["tls"]["certificates"]
+        self.assertEqual([entry["subject"] for entry in certificates], ["CN=server", "CN=other"])
+
     def test_dump_write_errors(self):
         existing = self.directory / "existing.crt"
         existing.write_bytes(b"existing trusted certificate\n")
@@ -268,6 +360,10 @@ class CertificateTests(unittest.TestCase):
 
     def test_invalid_options(self):
         cases = (
+            (("--tls-info",), b"--tls-info requires --tls"),
+            (("--tls", "--tls-info", "--dump-cert", "-"), b"--tls-info cannot be used with"),
+            (("--tls", "--tls-info", "-c", "PING"), b"--tls-info cannot be used with"),
+            (("--tls", "--tls-info", "--expect", "ready"), b"--tls-info cannot be used with"),
             (("--server-name", "localhost"), b"--server-name requires --tls"),
             (("--tls", "--server-name"), b"--server-name requires a value"),
             (("--tls", "--server-name", "bad name"), b"--server-name requires a valid"),
@@ -338,6 +434,7 @@ class CertificateTests(unittest.TestCase):
         result = self.client("--json", "--tls", "--dump-cert", path, expect=None)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["reason"], "certificate_dumped")
+        self.assertEqual(json.loads(result.stdout)["tls"]["verification"], "skipped")
         self.assertEqual(ssl.PEM_cert_to_DER_cert(path.read_text()), self.der.read_bytes())
         invalid = self.client("--json", "--tls", "--dump-cert", "-", expect=None)
         self.assertEqual(invalid.returncode, 2)

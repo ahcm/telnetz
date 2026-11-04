@@ -26,6 +26,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | `--no-default-ca` | Ignore bundled CAs; verified TLS trusts only `--cacert` files (needs `--tls`) |
 | `--cacert <FILE>` | Add trusted PEM/DER certificates; repeatable, needs `--tls`, conflicts with `--insecure` |
 | `--dump-cert <FILE>` | Fetch unverified leaf certificate as PEM and exit; needs `--tls`; `-` writes stdout; preserves existing files |
+| `--tls-info` | Inspect TLS settings and presented certificates, then exit; verified by default; combine with `--json` for the full result |
 | `-c, --command <LINE>` | Send LINE; repeatable, sent in order right after connecting |
 | `--expect <TEXT>` | Exit 0 once TEXT appears in the output; exit 3 if the connection ends first |
 | `-w, --timeout <SECS>` | Stop after SECS with no traffic (fractions allowed) |
@@ -88,6 +89,8 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
 - `--expect` stops at the read that contains the text. Output after it is not printed.
 - `--json` captures responses as `output_base64` and nullable `output_utf8`. It suppresses status messages.
   Check `exit_code`, `phase`, `reason`, and `matched`; idle timeout and EOF remain distinct even with exit 0.
+- JSON TLS results include `tls.protocol_version`, `cipher_suite`, `verification`, and leaf-first `certificates`.
+  `--tls-info` sends no application data. Use explicit `--insecure` for untrusted/expired peers; metadata reports verification as skipped.
 - Use `--cacert server.crt` for self-signed servers; hostname and expiry checks still apply.
 - Add `--no-default-ca` to exclude bundled CAs. With verification enabled and no `--cacert`, all server certificates are rejected.
 - `--dump-cert` skips trust, hostname, and expiry checks and sends no application data.
