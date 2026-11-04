@@ -1,6 +1,7 @@
 """Run after cargo build. Requires Python 3 and openssl; TELNETZ_BIN overrides the binary."""
 
 import contextlib
+import json
 import os
 from pathlib import Path
 import queue
@@ -253,6 +254,38 @@ class CertificateTests(unittest.TestCase):
 
     def test_insecure(self):
         self.assert_connected(self.client("--tls", "--insecure"))
+
+    def test_json_tls_errors(self):
+        for options, host, reason in (
+            ((), "localhost", "unknown_issuer"),
+            (("--cacert", self.cert), "127.0.0.1", "hostname_mismatch"),
+        ):
+            with self.subTest(reason=reason):
+                result = self.client("--json", "--tls", *options, host=host)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, b"")
+                report = json.loads(result.stdout)
+                self.assertEqual(report["phase"], "tls")
+                self.assertEqual(report["reason"], reason)
+
+    def test_json_deadline_loading_certificate(self):
+        fifo = self.directory / "blocked.crt"
+        os.mkfifo(fifo)
+        result = self.client("--json", "--tls", "--cacert", fifo, "--max-time", "0.1", expect=None)
+        report = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(report["phase"], "certificate")
+        self.assertEqual(report["reason"], "max_time")
+
+    def test_json_dump(self):
+        path = self.directory / "json-dump.crt"
+        result = self.client("--json", "--tls", "--dump-cert", path, expect=None)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["reason"], "certificate_dumped")
+        self.assertEqual(ssl.PEM_cert_to_DER_cert(path.read_text()), self.der.read_bytes())
+        invalid = self.client("--json", "--tls", "--dump-cert", "-", expect=None)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(json.loads(invalid.stdout)["phase"], "usage")
 
 
 if __name__ == "__main__":

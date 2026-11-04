@@ -31,6 +31,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | `--connect-timeout <SECS>` | Connect + TLS handshake limit, default 10 |
 | `--max-time <SECS>` | Total deadline, including blocked reads/writes; exits 4 |
 | `--max-bytes <BYTES>` | Positive received application byte cap; exits 4 unless `--expect` matches |
+| `--json` | One result object with termination reason, phase, timings, counts, and response; defaults to 1 MiB receive cap |
 | `--lf` | Terminate lines with `\n` instead of `\r\n` |
 | `--raw` | Forward stdin unchanged |
 | `-q, --quiet` | Suppress status messages |
@@ -83,6 +84,8 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
   For protocols that reject pipelining, run one command per invocation or pace a stdin pipe
   (`{ echo A; sleep 1; echo B; } | telnetz ...`).
 - `--expect` stops at the read that contains the text. Output after it is not printed.
+- `--json` captures responses as `output_base64` and nullable `output_utf8`. It suppresses status messages.
+  Check `exit_code`, `phase`, `reason`, and `matched`; idle timeout and EOF remain distinct even with exit 0.
 - Use `--cacert server.crt` for self-signed servers; hostname and expiry checks still apply.
 - Add `--no-default-ca` to exclude bundled CAs. With verification enabled and no `--cacert`, all server certificates are rejected.
 - `--dump-cert` skips trust, hostname, and expiry checks and sends no application data.

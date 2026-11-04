@@ -1,6 +1,8 @@
 """Local CLI regression tests. Run after cargo build; TELNETZ_BIN overrides the binary."""
 
 import contextlib
+import base64
+import json
 import os
 from pathlib import Path
 import socketserver
@@ -43,6 +45,83 @@ def client(port, *options, data=b""):
 
 
 class AgentTests(unittest.TestCase):
+    def result_json(self, result):
+        self.assertEqual(result.stderr, b"")
+        report = json.loads(result.stdout)
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["exit_code"], result.returncode)
+        self.assertEqual(report["ok"], result.returncode == 0)
+        self.assertGreaterEqual(report["elapsed_ms"], 0)
+        return report
+
+    def test_json_binary_and_sent_counts(self):
+        def reply(stream):
+            self.assertEqual(stream.recv(1024), b"PING\r\n")
+            stream.sendall(b"\x00\xffhello")
+
+        with tcp_server(reply) as port:
+            report = self.result_json(client(port, "--json", "-c", "PING", "--max-time", "1"))
+        self.assertEqual(report["reason"], "eof")
+        self.assertEqual(report["phase"], "read")
+        self.assertEqual(report["bytes_sent"], 6)
+        self.assertEqual(report["bytes_received"], 7)
+        self.assertEqual(base64.b64decode(report["output_base64"]), b"\x00\xffhello")
+        self.assertIsNone(report["output_utf8"])
+        self.assertTrue(report["peer_addr"].startswith("127.0.0.1:"))
+
+    def test_json_termination_conditions(self):
+        cases = (
+            (("--expect", "ready"), "expect_matched", 0),
+            (("-w", "0.05"), "idle_timeout", 0),
+            (("-w", "0.05", "--expect", "absent"), "idle_timeout", 3),
+            (("--max-time", "0.05"), "max_time", 4),
+            (("--max-bytes", "3"), "max_bytes", 4),
+        )
+        def reply(stream):
+            stream.sendall(b"ready")
+            stream.recv(1)
+
+        for options, reason, code in cases:
+            with self.subTest(reason=reason, options=options):
+                with tcp_server(reply) as port:
+                    result = client(port, "--json", "--max-time", "1", *options)
+                report = self.result_json(result)
+                self.assertEqual(result.returncode, code)
+                self.assertEqual(report["reason"], reason)
+                self.assertEqual(report["matched"], reason == "expect_matched")
+
+    def test_json_usage_and_connection_errors(self):
+        for options in (("--json", "--unknown"), ("--unknown", "--json")):
+            report = self.result_json(client(0, *options))
+            self.assertEqual(report["phase"], "usage")
+            self.assertEqual(report["reason"], "invalid_arguments")
+            self.assertIsNotNone(report["error"])
+        report = self.result_json(client(0, "--json"))
+        self.assertEqual(report["phase"], "connect")
+        self.assertEqual(report["reason"], "connection_refused")
+        plain = client(0, "-c", "--json")
+        self.assertEqual(plain.stdout, b"")
+        self.assertIn(b"Error:", plain.stderr)
+
+    def test_json_default_capture_cap(self):
+        with tcp_server(lambda stream: stream.sendall(b"x" * (1024 * 1024 + 10))) as port:
+            report = self.result_json(client(port, "--json", "--max-time", "2"))
+        self.assertEqual(report["reason"], "max_bytes")
+        self.assertEqual(report["bytes_received"], 1024 * 1024)
+        self.assertEqual(len(base64.b64decode(report["output_base64"])), 1024 * 1024)
+
+    def test_json_deadline_with_blocked_stdout(self):
+        with tcp_server(lambda stream: stream.sendall(b"x" * 100000)) as port:
+            with subprocess.Popen(
+                [str(BINARY), "127.0.0.1", str(port), "--json", "--max-time", "0.1"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ) as process:
+                try:
+                    self.assertEqual(process.wait(timeout=2), 4)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+
     def test_deadline_with_continuous_traffic(self):
         def flood(stream):
             while True:
@@ -72,9 +151,16 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 4, result.stderr)
 
     def test_deadline_during_blocked_write(self):
-        with tcp_server(lambda stream: time.sleep(1)) as port:
-            result = client(port, "--raw", "--max-time", "0.1", data=b"x" * (8 * 1024 * 1024))
-        self.assertEqual(result.returncode, 4, result.stderr)
+        for options in ((), ("--json",)):
+            with self.subTest(options=options):
+                with tcp_server(lambda stream: time.sleep(1)) as port:
+                    result = client(port, *options, "--raw", "--max-time", "0.1", data=b"x" * (8 * 1024 * 1024))
+                self.assertEqual(result.returncode, 4, result.stderr)
+                if options:
+                    report = self.result_json(result)
+                    self.assertEqual(report["phase"], "write")
+                    self.assertGreater(report["bytes_sent"], 0)
+                    self.assertLess(report["bytes_sent"], 8 * 1024 * 1024)
 
     def test_receive_limit_and_expect_boundary(self):
         for limit, expected_exit, expected_output in ((4, 4, b"abcd"), (6, 0, b"abcdef")):

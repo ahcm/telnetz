@@ -28,6 +28,14 @@
 - Hard limits exit 4. Runtime shutdown does not wait for outstanding blocking stdin or rustyline reads.
 - Local tests cover continuous traffic, open stdin, stalled TLS, blocked writes, and byte boundaries.
 
+# Structured results
+
+- `--json` emits schema version 1, including phase, termination reason, exit code, timings, counts, peer address, and response.
+- Responses use lossless base64 and nullable UTF-8. JSON mode defaults to a 1 MiB application byte cap.
+- Error classification uses typed I/O and rustls errors; certificate files use asynchronous reads.
+- Final JSON output gets the remaining total deadline, with a minimum 100 ms reporting budget.
+- Tests cover binary data, termination conditions, interrupted-write counts, certificate errors, file-loading deadlines, and blocked stdout.
+
 ## Verification
 
 ```sh

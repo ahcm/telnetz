@@ -27,6 +27,20 @@ Exit codes: 0 ok, 1 connection/IO error, 2 usage error, 3 `--expect` not seen,
 4 hard limit reached.
 See `telnetz --help`.
 
+Use `--json` for one result object on stdout, with no status messages. It includes
+`schema_version`, `ok`, `exit_code`, `phase`, `reason`, `error`, `elapsed_ms`,
+`bytes_sent`, `bytes_received`, `matched`, and `peer_addr`. `output_base64` preserves
+all received bytes; `output_utf8` contains the same response if valid UTF-8,
+otherwise null. JSON mode defaults to a 1 MiB receive cap; `--max-bytes` overrides it.
+Usage and connection failures also produce JSON. `--help` remains human-readable.
+`--json` can export certificates to files, but conflicts with `--dump-cert -`.
+The total deadline allows up to 100 ms extra to emit the final JSON result. If
+stdout blocks past that budget, output may be incomplete and the process exits 4.
+
+```sh
+telnetz localhost 6379 --json --max-time 3 -c PING
+```
+
 For a self-signed server, obtain its certificate first:
 
 ```sh

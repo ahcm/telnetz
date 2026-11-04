@@ -12,6 +12,9 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
 
+mod report;
+use report::Report;
+
 trait StreamLike: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> StreamLike for T {}
 type DynStream = Box<dyn StreamLike>;
@@ -39,6 +42,7 @@ struct Config {
     eol: &'static [u8],
     raw: bool,
     quiet: bool,
+    json: bool,
 }
 
 fn print_usage() {
@@ -63,6 +67,7 @@ fn print_usage() {
            --lf                   Terminate lines with LF instead of CRLF.\n\
            --raw                  Forward stdin bytes unchanged.\n\
            -q, --quiet            No status messages on stderr.\n\
+           --json                 Emit one JSON result (default byte cap 1 MiB).\n\
            -h, --help             Show this help.\n\
          \n\
          If stdin is a terminal, lines are read interactively; /quit or /exit\n\
@@ -82,7 +87,7 @@ fn parse_secs(flag: &str, value: &str) -> Result<Duration, Box<dyn Error>> {
         .ok_or_else(|| format!("{flag}: invalid seconds '{value}'").into())
 }
 
-fn parse_args() -> Result<Config, Box<dyn Error>> {
+fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut tls = false;
@@ -99,8 +104,9 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
     let mut eol: &'static [u8] = b"\r\n";
     let mut raw = false;
     let mut quiet = false;
+    let mut json = false;
 
-    let mut args = env::args().skip(1);
+    let mut args = arguments.iter().cloned();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
             args.next()
@@ -129,6 +135,7 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
             "--lf" => eol = b"\n",
             "--raw" => raw = true,
             "-q" | "--quiet" => quiet = true,
+            "--json" => json = true,
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -172,6 +179,13 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
         if !ca_certs.is_empty() || !commands.is_empty() || expect.is_some() {
             return Err("--dump-cert cannot be used with --cacert, --command, or --expect".into());
         }
+        if json && dump_cert.as_deref() == Some(Path::new("-")) {
+            return Err("--json cannot be used with --dump-cert -".into());
+        }
+    }
+
+    if json && max_bytes.is_none() {
+        max_bytes = Some(1024 * 1024);
     }
 
     Ok(Config {
@@ -190,15 +204,17 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
         max_bytes,
         eol,
         raw,
-        quiet,
+        quiet: quiet || json,
+        json,
     })
 }
 
-fn load_ca_certificates(
+async fn load_ca_certificates(
     root_store: &mut rustls::RootCertStore,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let contents = std::fs::read(path)
+    let contents = tokio::fs::read(path)
+        .await
         .map_err(|err| format!("Cannot read certificate file {}: {err}", path.display()))?;
     let mut certs = CertificateDer::pem_slice_iter(&contents)
         .collect::<Result<Vec<_>, _>>()
@@ -216,7 +232,9 @@ fn load_ca_certificates(
 
 async fn connect_tls(
     config: &Config,
+    report: &mut Report,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error>> {
+    report.phase = "certificate";
     let client_config = if config.insecure || config.dump_cert.is_some() {
         rustls::ClientConfig::builder()
             .dangerous()
@@ -228,7 +246,7 @@ async fn connect_tls(
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
         for path in &config.ca_certs {
-            load_ca_certificates(&mut root_store, path)?;
+            load_ca_certificates(&mut root_store, path).await?;
         }
         rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -238,22 +256,40 @@ async fn connect_tls(
     let connector = TlsConnector::from(std::sync::Arc::new(client_config));
     let server_name = rustls::pki_types::ServerName::try_from(config.host.clone())
         .map_err(|_| "Invalid DNS name for TLS")?;
-    let stream = TcpStream::connect((config.host.as_str(), config.port)).await?;
+    let stream = connect_tcp(config, report).await?;
+    report.phase = "tls";
     Ok(connector.connect(server_name, stream).await?)
 }
 
-async fn connect(config: &Config) -> Result<DynStream, Box<dyn Error>> {
+async fn connect_tcp(config: &Config, report: &mut Report) -> Result<TcpStream, Box<dyn Error>> {
+    report.phase = "dns";
+    let addresses: Vec<_> = tokio::net::lookup_host((config.host.as_str(), config.port))
+        .await?
+        .collect();
+    report.phase = "connect";
+    let stream = TcpStream::connect(addresses.as_slice()).await?;
+    report.peer_addr = Some(stream.peer_addr()?.to_string());
+    Ok(stream)
+}
+
+async fn connect(config: &Config, report: &mut Report) -> Result<DynStream, Box<dyn Error>> {
     if config.tls {
-        Ok(Box::new(connect_tls(config).await?))
+        Ok(Box::new(connect_tls(config, report).await?))
     } else {
-        Ok(Box::new(TcpStream::connect((config.host.as_str(), config.port)).await?))
+        Ok(Box::new(connect_tcp(config, report).await?))
     }
 }
 
-async fn dump_certificate(config: &Config, path: &Path) -> Result<u8, Box<dyn Error>> {
-    let mut stream = tokio::time::timeout(config.connect_timeout, connect_tls(config))
+async fn dump_certificate(
+    config: &Config,
+    path: &Path,
+    report: &mut Report,
+) -> Result<u8, Box<dyn Error>> {
+    let mut stream = tokio::time::timeout(config.connect_timeout, connect_tls(config, report))
         .await
-        .map_err(|_| format!("connect to {}:{} timed out", config.host, config.port))??;
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "connect/handshake timed out")
+        })??;
     let certificate = stream
         .get_ref()
         .1
@@ -269,6 +305,7 @@ async fn dump_certificate(config: &Config, path: &Path) -> Result<u8, Box<dyn Er
     pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
     let _ = stream.shutdown().await;
 
+    report.phase = "output";
     let write_result = async {
         let mut output: Box<dyn AsyncWrite + Unpin> = if path == Path::new("-") {
             Box::new(io::stdout())
@@ -289,7 +326,7 @@ async fn dump_certificate(config: &Config, path: &Path) -> Result<u8, Box<dyn Er
     if !config.quiet {
         eprintln!("Saved unverified server certificate to {}.", path.display());
     }
-    Ok(0)
+    Ok(report.finish(0, "certificate_dumped"))
 }
 
 #[derive(Debug)]
@@ -443,18 +480,20 @@ impl Matcher {
     }
 }
 
-async fn run(config: &Config) -> Result<u8, Box<dyn Error>> {
+async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>> {
     if let Some(path) = &config.dump_cert {
-        return dump_certificate(config, path).await;
+        return dump_certificate(config, path, report).await;
     }
-    let stream = tokio::time::timeout(config.connect_timeout, connect(config))
+    let stream = tokio::time::timeout(config.connect_timeout, connect(config, report))
         .await
-        .map_err(|_| format!("connect to {}:{} timed out", config.host, config.port))??;
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "connect/handshake timed out")
+        })??;
     let (read_half, mut write_half) = io::split(stream);
     let mut socket_reader = io::BufReader::new(read_half);
     let mut socket_buf = vec![0u8; 8192];
 
-    let interactive = config.commands.is_empty() && std::io::stdin().is_terminal();
+    let interactive = !config.json && config.commands.is_empty() && std::io::stdin().is_terminal();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     if !config.commands.is_empty() {
         spawn_commands(config, tx);
@@ -482,8 +521,11 @@ async fn run(config: &Config) -> Result<u8, Box<dyn Error>> {
 
     let mut stdout = io::stdout();
     let mut input_open = true;
-    let mut received = 0u64;
     loop {
+        report.phase = "read";
+        let read_size = config.max_bytes.map_or(socket_buf.len(), |limit| {
+            (limit - report.bytes_received).min(socket_buf.len() as u64) as usize
+        });
         let idle = async {
             match config.idle_timeout {
                 Some(d) => tokio::time::sleep(d).await,
@@ -491,83 +533,168 @@ async fn run(config: &Config) -> Result<u8, Box<dyn Error>> {
             }
         };
         tokio::select! {
-            result = socket_reader.read(&mut socket_buf) => {
+            result = socket_reader.read(&mut socket_buf[..read_size]) => {
                 let n = result?;
                 if n == 0 {
                     if !config.quiet {
                         eprintln!("\nConnection closed by remote.");
                     }
+                    report.reason = "eof";
                     break;
                 }
-                let n = config.max_bytes.map_or(n, |limit| n.min((limit - received).min(n as u64) as usize));
-                received += n as u64;
-                stdout.write_all(&socket_buf[..n]).await?;
-                stdout.flush().await?;
+                report.bytes_received += n as u64;
+                if config.json {
+                    report.output.extend_from_slice(&socket_buf[..n]);
+                } else {
+                    report.phase = "output";
+                    stdout.write_all(&socket_buf[..n]).await?;
+                    stdout.flush().await?;
+                    report.phase = "read";
+                }
                 if matcher.as_mut().is_some_and(|m| m.feed(&socket_buf[..n])) {
+                    report.matched = true;
+                    report.finish(0, "expect_matched");
                     let _ = write_half.shutdown().await;
                     return Ok(0);
                 }
-                if config.max_bytes.is_some_and(|limit| received >= limit) {
+                if config.max_bytes.is_some_and(|limit| report.bytes_received >= limit) {
                     if !config.quiet {
                         eprintln!("\nReceive byte limit reached.");
                     }
-                    return Ok(EXIT_LIMIT);
+                    return Ok(report.finish(EXIT_LIMIT, "max_bytes"));
                 }
             }
             msg = rx.recv(), if input_open => match msg {
                 Some(bytes) => {
-                    write_half.write_all(&bytes).await?;
+                    report.phase = "write";
+                    let mut remaining = bytes.as_slice();
+                    while !remaining.is_empty() {
+                        let n = write_half.write(remaining).await?;
+                        if n == 0 {
+                            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+                        }
+                        report.bytes_sent += n as u64;
+                        remaining = &remaining[n..];
+                    }
                     write_half.flush().await?;
                 }
-                None if interactive => break,
+                None if interactive => {
+                    report.reason = "input_closed";
+                    break;
+                },
                 None => input_open = false,
             },
             _ = idle => {
                 if !config.quiet {
                     eprintln!("\nIdle timeout.");
                 }
+                report.reason = "idle_timeout";
                 break;
             }
         }
     }
 
     let _ = write_half.shutdown().await;
-    Ok(if matcher.is_some() {
+    let code = if matcher.is_some() {
         EXIT_EXPECT_FAILED
     } else {
         0
-    })
+    };
+    Ok(report.finish(code, report.reason))
+}
+
+fn json_requested(arguments: &[String]) -> bool {
+    let mut args = arguments.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--json" {
+            return true;
+        }
+        if matches!(
+            arg.as_str(),
+            "--cacert"
+                | "--dump-cert"
+                | "-c"
+                | "--command"
+                | "--expect"
+                | "-w"
+                | "--timeout"
+                | "--connect-timeout"
+                | "--max-time"
+                | "--max-bytes"
+        ) {
+            args.next();
+        }
+    }
+    false
+}
+
+async fn emit_report(report: &Report) -> Result<(), Box<dyn Error>> {
+    let mut bytes = serde_json::to_vec(&report.json())?;
+    bytes.push(b'\n');
+    let mut output = io::stdout();
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+    Ok(())
 }
 
 async fn async_main() -> ExitCode {
-    let config = match parse_args() {
+    let arguments: Vec<_> = env::args().skip(1).collect();
+    let mut report = Report::new();
+    let config = match parse_args(&arguments) {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("Error: {err}");
-            print_usage();
+            if json_requested(&arguments) {
+                report.error = Some(err.to_string());
+                if let Err(err) = emit_report(&report).await {
+                    eprintln!("Error: {err}");
+                }
+            } else {
+                eprintln!("Error: {err}");
+                print_usage();
+            }
             return ExitCode::from(EXIT_USAGE);
         }
     };
 
     let result = match config.max_time {
-        Some(limit) => match tokio::time::timeout(limit, run(&config)).await {
+        Some(limit) => match tokio::time::timeout(limit, run(&config, &mut report)).await {
             Ok(result) => result,
             Err(_) => {
                 if !config.quiet {
                     eprintln!("Total time limit reached.");
                 }
-                return ExitCode::from(EXIT_LIMIT);
+                Ok(report.finish(EXIT_LIMIT, "max_time"))
             }
         },
-        None => run(&config).await,
+        None => run(&config, &mut report).await,
     };
-    match result {
-        Ok(code) => ExitCode::from(code),
+    let code = match result {
+        Ok(code) => code,
         Err(err) => {
+            report.fail(err.as_ref());
+            if !config.json {
+                eprintln!("Error: {err}");
+            }
+            EXIT_ERROR
+        }
+    };
+    if config.json {
+        let emitted = match config.max_time {
+            Some(limit) => {
+                match tokio::time::timeout(report.output_budget(limit), emit_report(&report)).await
+                {
+                    Ok(result) => result,
+                    Err(_) => return ExitCode::from(EXIT_LIMIT),
+                }
+            }
+            None => emit_report(&report).await,
+        };
+        if let Err(err) = emitted {
             eprintln!("Error: {err}");
-            ExitCode::from(EXIT_ERROR)
+            return ExitCode::from(EXIT_ERROR);
         }
     }
+    ExitCode::from(code)
 }
 
 fn main() -> ExitCode {
