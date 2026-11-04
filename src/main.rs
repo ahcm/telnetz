@@ -29,6 +29,7 @@ struct Config {
     host: String,
     port: u16,
     tls: bool,
+    server_name: Option<String>,
     insecure: bool,
     no_default_ca: bool,
     ca_certs: Vec<PathBuf>,
@@ -51,6 +52,7 @@ fn print_usage() {
          \n\
          Options:\n\
            --tls                  Use TLS for the connection.\n\
+           --server-name <NAME>   Override TLS SNI and certificate hostname.\n\
            --insecure             Skip certificate validation (TLS only).\n\
            --no-default-ca        Ignore bundled CA certificates (TLS only).\n\
            --cacert <FILE>        Trust extra PEM/DER certificates (TLS only;\n\
@@ -91,6 +93,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut tls = false;
+    let mut server_name = None;
     let mut insecure = false;
     let mut no_default_ca = false;
     let mut ca_certs = Vec::new();
@@ -114,6 +117,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
         };
         match arg.as_str() {
             "--tls" => tls = true,
+            "--server-name" => server_name = Some(value(&arg)?),
             "--insecure" => insecure = true,
             "--no-default-ca" => no_default_ca = true,
             "--cacert" => ca_certs.push(PathBuf::from(value(&arg)?)),
@@ -158,6 +162,13 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let host = host.ok_or("Missing host")?;
     let port = port.ok_or("Missing port")?;
 
+    if let Some(name) = &server_name {
+        if !tls {
+            return Err("--server-name requires --tls".into());
+        }
+        rustls::pki_types::ServerName::try_from(name.as_str())
+            .map_err(|_| "--server-name requires a valid DNS name or IP address")?;
+    }
     if insecure && !tls {
         return Err("--insecure requires --tls".into());
     }
@@ -192,6 +203,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
         host,
         port,
         tls,
+        server_name,
         insecure,
         no_default_ca,
         ca_certs,
@@ -254,7 +266,9 @@ async fn connect_tls(
     };
 
     let connector = TlsConnector::from(std::sync::Arc::new(client_config));
-    let server_name = rustls::pki_types::ServerName::try_from(config.host.clone())
+    let effective_name = config.server_name.as_ref().unwrap_or(&config.host);
+    report.server_name = Some(effective_name.clone());
+    let server_name = rustls::pki_types::ServerName::try_from(effective_name.clone())
         .map_err(|_| "Invalid DNS name for TLS")?;
     let stream = connect_tcp(config, report).await?;
     report.phase = "tls";
@@ -621,6 +635,7 @@ fn json_requested(arguments: &[String]) -> bool {
                 | "--connect-timeout"
                 | "--max-time"
                 | "--max-bytes"
+                | "--server-name"
         ) {
             args.next();
         }

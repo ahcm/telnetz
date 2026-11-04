@@ -36,6 +36,11 @@
 - Final JSON output gets the remaining total deadline, with a minimum 100 ms reporting budget.
 - Tests cover binary data, termination conditions, interrupted-write counts, certificate errors, file-loading deadlines, and blocked stdout.
 
+# TLS identity override
+
+- `--server-name` changes SNI and the certificate verification identity, independently of the connection address.
+- Tests connect to loopback, check the SNI received by the server, reject a mismatched override, and export with an override.
+
 ## Verification
 
 ```sh

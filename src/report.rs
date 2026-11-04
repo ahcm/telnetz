@@ -14,6 +14,7 @@ pub struct Report {
     pub bytes_received: u64,
     pub matched: bool,
     pub peer_addr: Option<String>,
+    pub server_name: Option<String>,
     pub output: Vec<u8>,
     started: Instant,
 }
@@ -29,6 +30,7 @@ impl Report {
             bytes_received: 0,
             matched: false,
             peer_addr: None,
+            server_name: None,
             output: Vec::new(),
             started: Instant::now(),
         }
@@ -102,6 +104,7 @@ impl Report {
             "bytes_received": self.bytes_received,
             "matched": self.matched,
             "peer_addr": self.peer_addr,
+            "server_name": self.server_name,
             "output_base64": STANDARD.encode(&self.output),
             "output_utf8": std::str::from_utf8(&self.output).ok(),
         })

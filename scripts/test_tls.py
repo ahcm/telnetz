@@ -18,9 +18,11 @@ BINARY = Path(os.environ.get("TELNETZ_BIN", ROOT / "target/debug/telnetz")).reso
 
 
 @contextlib.contextmanager
-def tls_server(cert, key, received=None, send_banner=True):
+def tls_server(cert, key, received=None, send_banner=True, server_names=None):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
+    if server_names is not None:
+        context.set_servername_callback(lambda connection, name, context: server_names.put(name))
 
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -118,6 +120,33 @@ class CertificateTests(unittest.TestCase):
                 result = self.client("--tls", *options, "--cacert", self.cert, host="127.0.0.1")
                 self.assertEqual(result.returncode, 1, result.stderr.decode())
                 self.assertIn(b"certificate not valid for name", result.stderr)
+
+    def test_server_name_override(self):
+        names = queue.Queue()
+        with tls_server(self.cert, self.key, server_names=names) as port:
+            result = self.client(
+                "--tls", "--cacert", self.cert, "--server-name", "localhost", "--json",
+                host="127.0.0.1", port=port,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["server_name"], "localhost")
+            self.assertEqual(report["reason"], "expect_matched")
+            self.assertEqual(names.get(timeout=1), "localhost")
+            wrong = self.client(
+                "--tls", "--cacert", self.cert, "--server-name", "wrong.example", "--json",
+                host="127.0.0.1", port=port,
+            )
+            self.assertEqual(wrong.returncode, 1)
+            self.assertEqual(json.loads(wrong.stdout)["reason"], "hostname_mismatch")
+            self.assertEqual(names.get(timeout=1), "wrong.example")
+            dumped = self.client(
+                "--tls", "--dump-cert", "-", "--server-name", "localhost",
+                host="127.0.0.1", port=port, expect=None,
+            )
+            self.assertEqual(dumped.returncode, 0, dumped.stderr)
+            self.assertEqual(ssl.PEM_cert_to_DER_cert(dumped.stdout.decode()), self.der.read_bytes())
+            self.assertEqual(names.get(timeout=1), "localhost")
 
     def test_expired_certificate(self):
         config = self.directory / "ca.cnf"
@@ -236,6 +265,9 @@ class CertificateTests(unittest.TestCase):
 
     def test_invalid_options(self):
         cases = (
+            (("--server-name", "localhost"), b"--server-name requires --tls"),
+            (("--tls", "--server-name"), b"--server-name requires a value"),
+            (("--tls", "--server-name", "bad name"), b"--server-name requires a valid"),
             (("--no-default-ca",), b"--no-default-ca requires --tls"),
             (("--cacert", self.cert), b"--cacert requires --tls"),
             (("--tls", "--cacert", self.cert, "--insecure"), b"--cacert cannot be used with --insecure"),

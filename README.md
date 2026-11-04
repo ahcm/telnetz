@@ -76,6 +76,15 @@ hostname, or expiry. It requires `--tls` and cannot be combined with `--cacert`,
 `--command`, or `--expect`. Existing files are preserved. Use `--dump-cert -` to
 write PEM to stdout.
 
+Use `--server-name <name>` with `--tls` to set both SNI and the certificate
+verification identity while connecting to a different address:
+
+```sh
+telnetz 127.0.0.1 8443 --tls --server-name service.example --cacert server.crt
+```
+
+JSON results include the effective TLS `server_name` separately from `peer_addr`.
+
 ## Agent skill
 
 `skills/telnetz/SKILL.md` teaches coding agents to use telnetz. For Claude Code:

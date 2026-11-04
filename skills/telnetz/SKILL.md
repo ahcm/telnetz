@@ -21,6 +21,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | Option | Effect |
 |---|---|
 | `--tls` | TLS with webpki roots; SNI is the host name |
+| `--server-name <NAME>` | Override SNI and certificate verification identity; connect address stays unchanged; needs `--tls` |
 | `--insecure` | Skip certificate verification (needs `--tls`) |
 | `--no-default-ca` | Ignore bundled CAs; verified TLS trusts only `--cacert` files (needs `--tls`) |
 | `--cacert <FILE>` | Add trusted PEM/DER certificates; repeatable, needs `--tls`, conflicts with `--insecure` |
