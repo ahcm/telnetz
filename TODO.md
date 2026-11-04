@@ -1,4 +1,4 @@
 # Open issues
 
-- Add write-side shutdown and TLS inspection.
+- Add TLS inspection.
 - Discuss conversation scripts before implementation.

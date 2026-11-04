@@ -3,6 +3,7 @@
 - Added total deadlines and received application byte limits with exit code 4.
 - Added structured JSON results with bounded response capture and typed failure reasons.
 - Added TLS SNI and certificate identity overrides via `--server-name`.
+- Added write-side shutdown after commands or stdin, while retaining reply reads.
 
 - Added repeatable `--cacert` imports for PEM certificates, PEM bundles, and DER certificates.
 - Added `--no-default-ca` to exclude bundled CAs while preserving certificate verification.

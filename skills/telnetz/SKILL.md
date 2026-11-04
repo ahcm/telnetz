@@ -35,6 +35,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | `--json` | One result object with termination reason, phase, timings, counts, and response; defaults to 1 MiB receive cap |
 | `--lf` | Terminate lines with `\n` instead of `\r\n` |
 | `--raw` | Forward stdin unchanged |
+| `--shutdown-write` | Signal EOF after commands/stdin finish, then continue receiving replies |
 | `-q, --quiet` | Suppress status messages |
 
 ## Exit codes

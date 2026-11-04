@@ -42,6 +42,7 @@ struct Config {
     max_bytes: Option<u64>,
     eol: &'static [u8],
     raw: bool,
+    shutdown_write: bool,
     quiet: bool,
     json: bool,
 }
@@ -68,6 +69,7 @@ fn print_usage() {
            --max-bytes <BYTES>    Limit received application bytes (positive).\n\
            --lf                   Terminate lines with LF instead of CRLF.\n\
            --raw                  Forward stdin bytes unchanged.\n\
+           --shutdown-write       Signal EOF after input; keep reading replies.\n\
            -q, --quiet            No status messages on stderr.\n\
            --json                 Emit one JSON result (default byte cap 1 MiB).\n\
            -h, --help             Show this help.\n\
@@ -106,6 +108,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let mut max_bytes = None;
     let mut eol: &'static [u8] = b"\r\n";
     let mut raw = false;
+    let mut shutdown_write = false;
     let mut quiet = false;
     let mut json = false;
 
@@ -138,6 +141,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
             }
             "--lf" => eol = b"\n",
             "--raw" => raw = true,
+            "--shutdown-write" => shutdown_write = true,
             "-q" | "--quiet" => quiet = true,
             "--json" => json = true,
             "-h" | "--help" => {
@@ -216,6 +220,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
         max_bytes,
         eol,
         raw,
+        shutdown_write,
         quiet: quiet || json,
         json,
     })
@@ -596,7 +601,13 @@ async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
                     report.reason = "input_closed";
                     break;
                 },
-                None => input_open = false,
+                None => {
+                    input_open = false;
+                    if config.shutdown_write {
+                        report.phase = "write";
+                        write_half.shutdown().await?;
+                    }
+                },
             },
             _ = idle => {
                 if !config.quiet {

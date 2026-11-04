@@ -85,6 +85,12 @@ telnetz 127.0.0.1 8443 --tls --server-name service.example --cacert server.crt
 
 JSON results include the effective TLS `server_name` separately from `peer_addr`.
 
+`--shutdown-write` closes the sending side after all `-c` commands or piped input
+have been sent, including empty stdin. It continues receiving replies until EOF,
+an expectation match, or a limit. With TLS it sends `close_notify`; the peer must
+support replying after that notification. Without this flag, input EOF keeps the
+sending side open.
+
 ## Agent skill
 
 `skills/telnetz/SKILL.md` teaches coding agents to use telnetz. For Claude Code:

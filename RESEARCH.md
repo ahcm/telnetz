@@ -41,6 +41,12 @@
 - `--server-name` changes SNI and the certificate verification identity, independently of the connection address.
 - Tests connect to loopback, check the SNI received by the server, reject a mismatched override, and export with an override.
 
+# Input EOF handling
+
+- `--shutdown-write` performs TCP write shutdown or sends TLS `close_notify` after non-interactive input ends.
+- Reading continues after shutdown. The default behavior still keeps the sending side open at input EOF.
+- Tests cover commands, normalized lines, raw binary input, empty input, opt-in behavior, and a TLS peer that replies after EOF.
+
 ## Verification
 
 ```sh

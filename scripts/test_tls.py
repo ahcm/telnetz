@@ -18,7 +18,7 @@ BINARY = Path(os.environ.get("TELNETZ_BIN", ROOT / "target/debug/telnetz")).reso
 
 
 @contextlib.contextmanager
-def tls_server(cert, key, received=None, send_banner=True, server_names=None):
+def tls_server(cert, key, received=None, send_banner=True, server_names=None, action=None):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
     if server_names is not None:
@@ -29,6 +29,9 @@ def tls_server(cert, key, received=None, send_banner=True, server_names=None):
             self.request.settimeout(3)
             try:
                 with context.wrap_socket(self.request, server_side=True) as stream:
+                    if action is not None:
+                        action(stream)
+                        return
                     if send_banner:
                         stream.sendall(b"ready\r\n")
                     if received is not None:
@@ -286,6 +289,27 @@ class CertificateTests(unittest.TestCase):
 
     def test_insecure(self):
         self.assert_connected(self.client("--tls", "--insecure"))
+
+    def test_tls_shutdown_write(self):
+        received = queue.Queue()
+        def reply(stream):
+            data = bytearray()
+            while chunk := stream.recv(4096):
+                data.extend(chunk)
+            received.put(bytes(data))
+            stream.sendall(b"reply:" + data)
+
+        with tls_server(self.cert, self.key, action=reply) as port:
+            result = self.client(
+                "--tls", "--cacert", self.cert, "--shutdown-write", "--json", "-c", "PING",
+                port=port, expect="reply:",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["reason"], "expect_matched")
+            self.assertEqual(report["bytes_sent"], 6)
+            self.assertEqual(report["output_utf8"], "reply:PING\r\n")
+            self.assertEqual(received.get(timeout=1), b"PING\r\n")
 
     def test_json_tls_errors(self):
         for options, host, reason in (

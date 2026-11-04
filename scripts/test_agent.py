@@ -45,6 +45,36 @@ def client(port, *options, data=b""):
 
 
 class AgentTests(unittest.TestCase):
+    def test_shutdown_write_preserves_replies(self):
+        def reply(stream):
+            received = bytearray()
+            while chunk := stream.recv(4096):
+                received.extend(chunk)
+            stream.sendall(b"reply:" + received)
+
+        for options, data, expected in (
+            (("-c", "PING"), b"", b"PING\r\n"),
+            ((), b"one\ntwo\n", b"one\r\ntwo\r\n"),
+            (("--raw",), b"\x00\xffhello", b"\x00\xffhello"),
+            ((), b"", b""),
+        ):
+            with self.subTest(options=options, data=data):
+                with tcp_server(reply) as port:
+                    result = client(port, "--shutdown-write", "--max-time", "1", *options, data=data)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, b"reply:" + expected)
+
+    def test_shutdown_write_is_opt_in(self):
+        def reply(stream):
+            while stream.recv(4096):
+                pass
+            stream.sendall(b"reply")
+
+        with tcp_server(reply) as port:
+            result = client(port, "--max-time", "0.05", "-c", "PING")
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertEqual(result.stdout, b"")
+
     def result_json(self, result):
         self.assertEqual(result.stderr, b"")
         report = json.loads(result.stdout)
