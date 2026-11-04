@@ -1,3 +1,4 @@
 # Open issues
 
-No open issues identified in certificate trust configuration or import/export validation.
+- Add structured JSON results, TLS hostname overrides, write-side shutdown, and TLS inspection.
+- Discuss conversation scripts before implementation.

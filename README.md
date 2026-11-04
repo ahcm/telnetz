@@ -17,7 +17,14 @@ telnetz -q -w 1 -c PING localhost 6379
 printf 'GET / HTTP/1.0\r\n\r\n' | telnetz -q --raw -w 5 example.com 80
 ```
 
-Exit codes: 0 ok, 1 connection/IO error, 2 usage error, 3 `--expect` not seen.
+`--max-time <seconds>` bounds the entire operation, including connection,
+handshake, and blocked reads/writes. `--max-bytes <positive integer>` limits
+received application bytes. Reaching either limit exits 4. An `--expect` match
+within the byte limit succeeds, including at the exact boundary. Certificate
+exports do not receive application bytes, so their output is outside the byte cap.
+
+Exit codes: 0 ok, 1 connection/IO error, 2 usage error, 3 `--expect` not seen,
+4 hard limit reached.
 See `telnetz --help`.
 
 For a self-signed server, obtain its certificate first:

@@ -11,8 +11,8 @@ Server output goes to stdout. Status and errors go to stderr.
 ## Rules for non-interactive use
 
 - Always pass `-q` so stdout contains only server bytes.
-- Always bound the run: `-w <secs>` (idle timeout) and/or `--expect <text>`.
-  Without them telnetz waits until the server closes the connection.
+- Bound the run with `--max-time <secs>`; use `--max-bytes <bytes>` to cap output.
+  `-w` only limits idle time. `--expect` alone imposes no deadline.
 - Send input with repeated `-c <line>`, or pipe it on stdin. With `-c`, stdin is not read.
 - Lines are sent with CRLF. Use `--lf` for LF-only protocols, `--raw` to pipe exact bytes.
 
@@ -29,6 +29,8 @@ Server output goes to stdout. Status and errors go to stderr.
 | `--expect <TEXT>` | Exit 0 once TEXT appears in the output; exit 3 if the connection ends first |
 | `-w, --timeout <SECS>` | Stop after SECS with no traffic (fractions allowed) |
 | `--connect-timeout <SECS>` | Connect + TLS handshake limit, default 10 |
+| `--max-time <SECS>` | Total deadline, including blocked reads/writes; exits 4 |
+| `--max-bytes <BYTES>` | Positive received application byte cap; exits 4 unless `--expect` matches |
 | `--lf` | Terminate lines with `\n` instead of `\r\n` |
 | `--raw` | Forward stdin unchanged |
 | `-q, --quiet` | Suppress status messages |
@@ -41,6 +43,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | 1 | Connect failure, connect timeout, TLS or I/O error |
 | 2 | Usage error |
 | 3 | `--expect` text never appeared |
+| 4 | Total time or receive byte limit reached |
 
 ## Examples
 

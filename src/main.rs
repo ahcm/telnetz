@@ -19,6 +19,7 @@ type DynStream = Box<dyn StreamLike>;
 const EXIT_ERROR: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 const EXIT_EXPECT_FAILED: u8 = 3;
+const EXIT_LIMIT: u8 = 4;
 
 #[derive(Debug)]
 struct Config {
@@ -33,6 +34,8 @@ struct Config {
     expect: Option<String>,
     idle_timeout: Option<Duration>,
     connect_timeout: Duration,
+    max_time: Option<Duration>,
+    max_bytes: Option<u64>,
     eol: &'static [u8],
     raw: bool,
     quiet: bool,
@@ -55,6 +58,8 @@ fn print_usage() {
                                   exit 3 if the connection ends without it.\n\
            -w, --timeout <SECS>   Exit after SECS without traffic.\n\
            --connect-timeout <SECS>  Connect/handshake timeout (default 10).\n\
+           --max-time <SECS>      Limit total connection/session time.\n\
+           --max-bytes <BYTES>    Limit received application bytes (positive).\n\
            --lf                   Terminate lines with LF instead of CRLF.\n\
            --raw                  Forward stdin bytes unchanged.\n\
            -q, --quiet            No status messages on stderr.\n\
@@ -65,7 +70,7 @@ fn print_usage() {
          until the remote closes, --expect matches or -w expires.\n\
          \n\
          Exit codes: 0 ok, 1 connection/IO error, 2 usage error,\n\
-         3 --expect text not seen.\n"
+         3 --expect text not seen, 4 hard limit reached.\n"
     );
 }
 
@@ -89,6 +94,8 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
     let mut expect = None;
     let mut idle_timeout = None;
     let mut connect_timeout = Duration::from_secs(10);
+    let mut max_time = None;
+    let mut max_bytes = None;
     let mut eol: &'static [u8] = b"\r\n";
     let mut raw = false;
     let mut quiet = false;
@@ -109,6 +116,16 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
             "--expect" => expect = Some(value(&arg)?).filter(|s| !s.is_empty()),
             "-w" | "--timeout" => idle_timeout = Some(parse_secs(&arg, &value(&arg)?)?),
             "--connect-timeout" => connect_timeout = parse_secs(&arg, &value(&arg)?)?,
+            "--max-time" => max_time = Some(parse_secs(&arg, &value(&arg)?)?),
+            "--max-bytes" => {
+                max_bytes = Some(
+                    value(&arg)?
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or("--max-bytes requires a positive integer")?,
+                );
+            }
             "--lf" => eol = b"\n",
             "--raw" => raw = true,
             "-q" | "--quiet" => quiet = true,
@@ -169,6 +186,8 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
         expect,
         idle_timeout,
         connect_timeout,
+        max_time,
+        max_bytes,
         eol,
         raw,
         quiet,
@@ -424,11 +443,11 @@ impl Matcher {
     }
 }
 
-async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
+async fn run(config: &Config) -> Result<u8, Box<dyn Error>> {
     if let Some(path) = &config.dump_cert {
-        return dump_certificate(&config, path).await;
+        return dump_certificate(config, path).await;
     }
-    let stream = tokio::time::timeout(config.connect_timeout, connect(&config))
+    let stream = tokio::time::timeout(config.connect_timeout, connect(config))
         .await
         .map_err(|_| format!("connect to {}:{} timed out", config.host, config.port))??;
     let (read_half, mut write_half) = io::split(stream);
@@ -438,7 +457,7 @@ async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
     let interactive = config.commands.is_empty() && std::io::stdin().is_terminal();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     if !config.commands.is_empty() {
-        spawn_commands(&config, tx);
+        spawn_commands(config, tx);
     } else if interactive {
         spawn_readline(config.eol, tx);
     } else {
@@ -463,6 +482,7 @@ async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
 
     let mut stdout = io::stdout();
     let mut input_open = true;
+    let mut received = 0u64;
     loop {
         let idle = async {
             match config.idle_timeout {
@@ -479,11 +499,19 @@ async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
                     }
                     break;
                 }
+                let n = config.max_bytes.map_or(n, |limit| n.min((limit - received).min(n as u64) as usize));
+                received += n as u64;
                 stdout.write_all(&socket_buf[..n]).await?;
                 stdout.flush().await?;
                 if matcher.as_mut().is_some_and(|m| m.feed(&socket_buf[..n])) {
                     let _ = write_half.shutdown().await;
                     return Ok(0);
+                }
+                if config.max_bytes.is_some_and(|limit| received >= limit) {
+                    if !config.quiet {
+                        eprintln!("\nReceive byte limit reached.");
+                    }
+                    return Ok(EXIT_LIMIT);
                 }
             }
             msg = rx.recv(), if input_open => match msg {
@@ -511,8 +539,7 @@ async fn run(config: Config) -> Result<u8, Box<dyn Error>> {
     })
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+async fn async_main() -> ExitCode {
     let config = match parse_args() {
         Ok(config) => config,
         Err(err) => {
@@ -522,11 +549,40 @@ async fn main() -> ExitCode {
         }
     };
 
-    match run(config).await {
+    let result = match config.max_time {
+        Some(limit) => match tokio::time::timeout(limit, run(&config)).await {
+            Ok(result) => result,
+            Err(_) => {
+                if !config.quiet {
+                    eprintln!("Total time limit reached.");
+                }
+                return ExitCode::from(EXIT_LIMIT);
+            }
+        },
+        None => run(&config).await,
+    };
+    match result {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             eprintln!("Error: {err}");
             ExitCode::from(EXIT_ERROR)
         }
     }
+}
+
+fn main() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+    let result = runtime.block_on(async_main());
+    // stdin and rustyline may have outstanding blocking reads at the deadline.
+    runtime.shutdown_background();
+    result
 }

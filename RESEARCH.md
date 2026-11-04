@@ -21,11 +21,19 @@
 - Exported certificates require identity verification through a trusted channel before use with `--cacert`.
 - PEM encoding uses `base64` 0.22 with 64-character lines and a trailing newline.
 
+# Agent execution limits
+
+- `--max-time` covers connection establishment, TLS handshake, session I/O, and certificate export.
+- `--max-bytes` caps received application bytes; an expectation match within the cap takes precedence.
+- Hard limits exit 4. Runtime shutdown does not wait for outstanding blocking stdin or rustyline reads.
+- Local tests cover continuous traffic, open stdin, stalled TLS, blocked writes, and byte boundaries.
+
 ## Verification
 
 ```sh
 cargo build --offline
 python3 scripts/test_tls.py
+python3 scripts/test_agent.py
 cargo test --offline
 cargo clippy --offline --all-targets -- -D warnings
 cargo fmt --check
