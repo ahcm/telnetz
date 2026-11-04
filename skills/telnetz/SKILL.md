@@ -28,6 +28,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | `--dump-cert <FILE>` | Fetch unverified leaf certificate as PEM and exit; needs `--tls`; `-` writes stdout; preserves existing files |
 | `--tls-info` | Inspect TLS settings and presented certificates, then exit; verified by default; combine with `--json` for the full result |
 | `-c, --command <LINE>` | Send LINE; repeatable, sent in order right after connecting |
+| `--script <FILE>` | Run a JSON/TOML conversation with buffered expects and failure branches; default 1 MiB receive cap |
 | `--expect <TEXT>` | Exit 0 once TEXT appears in the output; exit 3 if the connection ends first |
 | `-w, --timeout <SECS>` | Stop after SECS with no traffic (fractions allowed) |
 | `--connect-timeout <SECS>` | Connect + TLS handshake limit, default 10 |
@@ -52,6 +53,9 @@ Server output goes to stdout. Status and errors go to stderr.
 ## Examples
 
 ```sh
+# Run a conversation with per-step diagnostics in script.steps
+telnetz -q --script examples/smtp.toml --json --max-time 10 localhost 25
+
 # Is the port open and does it speak SMTP?
 telnetz -q --expect '220' -w 5 mail.example.com 25
 
@@ -86,6 +90,9 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
 - All `-c` lines are sent immediately; telnetz does not wait for a reply between lines.
   For protocols that reject pipelining, run one command per invocation or pace a stdin pipe
   (`{ echo A; sleep 1; echo B; } | telnetz ...`).
+- Use `--script` for wait/send sequences. Read `SCRIPTING.md` for the shared JSON/TOML schema.
+  Actions are `send_line`, `send`, `send_base64`, `expect`, `expect_eof`, `shutdown_write`, and `fail`.
+  Expectations support `then`, `else`, `on_timeout`, and `on_eof`; global limits remain terminal.
 - `--expect` stops at the read that contains the text. Output after it is not printed.
 - `--json` captures responses as `output_base64` and nullable `output_utf8`. It suppresses status messages.
   Check `exit_code`, `phase`, `reason`, and `matched`; idle timeout and EOF remain distinct even with exit 0.

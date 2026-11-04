@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "step_timeout": 2,
+  "steps": [
+    {
+      "name": "greeting",
+      "expect": "220 ",
+      "else": [{"fail": "No SMTP greeting"}]
+    },
+    {"send_line": "EHLO agent.example"},
+    {
+      "name": "capabilities",
+      "expect": [
+        {"text": "250 "},
+        {"text": "550 ", "then": [{"fail": "EHLO rejected"}]}
+      ]
+    },
+    {"send_line": "QUIT"},
+    {"expect": "221 "},
+    {"expect_eof": true}
+  ]
+}

@@ -1,5 +1,9 @@
 # Completed
 
+- Added JSON/TOML conversation scripts with one validated step model.
+- Added literal alternatives, success/failure branches, EOF handling, exact/binary sends, and per-step deadlines.
+- Added bounded matching buffers, global limit enforcement, per-step JSON traces, and SMTP examples.
+
 - Added total deadlines and received application byte limits with exit code 4.
 - Added structured JSON results with bounded response capture and typed failure reasons.
 - Added TLS SNI and certificate identity overrides via `--server-name`.

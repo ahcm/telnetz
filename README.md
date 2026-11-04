@@ -11,6 +11,16 @@ At a terminal it reads lines interactively (`/quit` exits). With piped stdin or 
 it sends the input and prints the reply until the server closes, `-w` expires
 or `--expect` matches, so it can be used from scripts and AI agents.
 
+Use `--script <file.json|file.toml>` for sequential sends, buffered expectations,
+alternate replies, and timeout/EOF handlers. Both formats share one schema.
+
+```sh
+telnetz localhost 25 --script examples/smtp.toml --json --max-time 10
+```
+
+See [SCRIPTING.md](SCRIPTING.md) and the equivalent [JSON](examples/smtp.json) and
+[TOML](examples/smtp.toml) examples. Script mode defaults to a 1 MiB receive cap.
+
 ```sh
 telnetz -q --expect 220 -w 5 mail.example.com 25            # exit 0 if banner seen, 3 if not
 telnetz -q -w 1 -c PING localhost 6379

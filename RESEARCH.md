@@ -57,18 +57,29 @@
 - Tests compare fingerprints with Python hashlib and validity timestamps with OpenSSL output.
 - Inspection tests cover TLS 1.2/1.3, typed DNS/IPv4/IPv6/URI/email SANs, chain order, expired certificates, and open stdin with no application data.
 
+# Conversation scripts
+
+- JSON and TOML deserialize into one strict model; all branches are validated before connecting.
+- Literal alternatives select the earliest completed match, with declaration order breaking ties.
+- Matching scans new bytes plus pattern overlap; bytes after a match and unmatched bytes after recovery are preserved.
+- Global limits and transport errors terminate; expectation timeout/EOF handlers retain their original outcomes in traces.
+- Source size, branch depth, step count, case count, and the default receive buffer are bounded.
+- Local tests cover both formats, fragmented/coalesced replies, branch order, handler precedence, limits, binary data, TLS, and open stdin.
+
 ## Verification
 
-All 14 agent/TCP tests and 21 TLS tests pass. Cargo tests, Clippy with warnings
-denied, formatting, and whitespace checks pass.
+All 57 regression tests passed against the release binary: 22 conversation tests,
+14 agent/TCP tests, and 21 TLS tests. The release build, Cargo tests, Clippy with
+warnings denied, nightly formatting, and whitespace checks passed.
 
 ```sh
 cargo build --offline
 python3 scripts/test_tls.py
 python3 scripts/test_agent.py
+python3 scripts/test_scripts.py
 cargo test --offline
 cargo clippy --offline --all-targets -- -D warnings
-cargo fmt --check
+cargo +nightly fmt --check
 git diff --check
 ```
 

@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
 
 mod report;
+mod script;
 mod tls_info;
 use report::Report;
 
@@ -26,7 +27,8 @@ const EXIT_EXPECT_FAILED: u8 = 3;
 const EXIT_LIMIT: u8 = 4;
 
 #[derive(Debug)]
-struct Config {
+struct Config
+{
     host: String,
     port: u16,
     tls: bool,
@@ -37,6 +39,7 @@ struct Config {
     dump_cert: Option<PathBuf>,
     tls_info: bool,
     commands: Vec<String>,
+    script: Option<PathBuf>,
     expect: Option<String>,
     idle_timeout: Option<Duration>,
     connect_timeout: Duration,
@@ -49,7 +52,8 @@ struct Config {
     json: bool,
 }
 
-fn print_usage() {
+fn print_usage()
+{
     eprintln!(
         "Usage: telnetz <host> <port> [options]\n\
          \n\
@@ -64,6 +68,7 @@ fn print_usage() {
                                   Use - for stdout; existing files are preserved.\n\
            --tls-info             Inspect TLS and certificates, then exit.\n\
            -c, --command <LINE>   Send LINE (repeatable); stdin is not read.\n\
+           --script <FILE>        Run a JSON/TOML conversation script.\n\
            --expect <TEXT>        Exit 0 as soon as TEXT appears in the output,\n\
                                   exit 3 if the connection ends without it.\n\
            -w, --timeout <SECS>   Exit after SECS without traffic.\n\
@@ -86,7 +91,8 @@ fn print_usage() {
     );
 }
 
-fn parse_secs(flag: &str, value: &str) -> Result<Duration, Box<dyn Error>> {
+fn parse_secs(flag: &str, value: &str) -> Result<Duration, Box<dyn Error>>
+{
     value
         .parse::<f64>()
         .ok()
@@ -94,7 +100,8 @@ fn parse_secs(flag: &str, value: &str) -> Result<Duration, Box<dyn Error>> {
         .ok_or_else(|| format!("{flag}: invalid seconds '{value}'").into())
 }
 
-fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
+fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
+{
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut tls = false;
@@ -105,6 +112,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let mut dump_cert = None;
     let mut tls_info = false;
     let mut commands = Vec::new();
+    let mut script = None;
     let mut expect = None;
     let mut idle_timeout = None;
     let mut connect_timeout = Duration::from_secs(10);
@@ -117,12 +125,14 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let mut json = false;
 
     let mut args = arguments.iter().cloned();
-    while let Some(arg) = args.next() {
+    while let Some(arg) = args.next()
+    {
         let mut value = |flag: &str| {
             args.next()
                 .ok_or_else(|| format!("{flag} requires a value"))
         };
-        match arg.as_str() {
+        match arg.as_str()
+        {
             "--tls" => tls = true,
             "--server-name" => server_name = Some(value(&arg)?),
             "--insecure" => insecure = true,
@@ -131,11 +141,13 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
             "--dump-cert" => dump_cert = Some(PathBuf::from(value(&arg)?)),
             "--tls-info" => tls_info = true,
             "-c" | "--command" => commands.push(value(&arg)?),
+            "--script" => script = Some(PathBuf::from(value(&arg)?)),
             "--expect" => expect = Some(value(&arg)?).filter(|s| !s.is_empty()),
             "-w" | "--timeout" => idle_timeout = Some(parse_secs(&arg, &value(&arg)?)?),
             "--connect-timeout" => connect_timeout = parse_secs(&arg, &value(&arg)?)?,
             "--max-time" => max_time = Some(parse_secs(&arg, &value(&arg)?)?),
-            "--max-bytes" => {
+            "--max-bytes" =>
+            {
                 max_bytes = Some(
                     value(&arg)?
                         .parse::<u64>()
@@ -149,19 +161,27 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
             "--shutdown-write" => shutdown_write = true,
             "-q" | "--quiet" => quiet = true,
             "--json" => json = true,
-            "-h" | "--help" => {
+            "-h" | "--help" =>
+            {
                 print_usage();
                 std::process::exit(0);
             }
-            _ if arg.starts_with('-') && arg.len() > 1 => {
+            _ if arg.starts_with('-') && arg.len() > 1 =>
+            {
                 return Err(format!("Unknown option: {arg}").into());
             }
-            _ => {
-                if host.is_none() {
+            _ =>
+            {
+                if host.is_none()
+                {
                     host = Some(arg);
-                } else if port.is_none() {
+                }
+                else if port.is_none()
+                {
                     port = Some(arg.parse().map_err(|_| format!("Invalid port: {arg}"))?);
-                } else {
+                }
+                else
+                {
                     return Err(format!("Unexpected argument: {arg}").into());
                 }
             }
@@ -171,48 +191,73 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
     let host = host.ok_or("Missing host")?;
     let port = port.ok_or("Missing port")?;
 
-    if tls_info {
-        if !tls {
+    if script.is_some()
+        && (!commands.is_empty()
+            || expect.is_some()
+            || dump_cert.is_some()
+            || tls_info
+            || raw
+            || shutdown_write)
+    {
+        return Err("--script cannot be used with --command, --expect, --dump-cert, --tls-info, --raw, or --shutdown-write".into());
+    }
+    if tls_info
+    {
+        if !tls
+        {
             return Err("--tls-info requires --tls".into());
         }
-        if dump_cert.is_some() || !commands.is_empty() || expect.is_some() {
+        if dump_cert.is_some() || !commands.is_empty() || expect.is_some()
+        {
             return Err("--tls-info cannot be used with --dump-cert, --command, or --expect".into());
         }
     }
-    if let Some(name) = &server_name {
-        if !tls {
+    if let Some(name) = &server_name
+    {
+        if !tls
+        {
             return Err("--server-name requires --tls".into());
         }
         rustls::pki_types::ServerName::try_from(name.as_str())
             .map_err(|_| "--server-name requires a valid DNS name or IP address")?;
     }
-    if insecure && !tls {
+    if insecure && !tls
+    {
         return Err("--insecure requires --tls".into());
     }
-    if no_default_ca && !tls {
+    if no_default_ca && !tls
+    {
         return Err("--no-default-ca requires --tls".into());
     }
-    if !ca_certs.is_empty() {
-        if !tls {
+    if !ca_certs.is_empty()
+    {
+        if !tls
+        {
             return Err("--cacert requires --tls".into());
         }
-        if insecure {
+        if insecure
+        {
             return Err("--cacert cannot be used with --insecure".into());
         }
     }
-    if dump_cert.is_some() {
-        if !tls {
+    if dump_cert.is_some()
+    {
+        if !tls
+        {
             return Err("--dump-cert requires --tls".into());
         }
-        if !ca_certs.is_empty() || !commands.is_empty() || expect.is_some() {
+        if !ca_certs.is_empty() || !commands.is_empty() || expect.is_some()
+        {
             return Err("--dump-cert cannot be used with --cacert, --command, or --expect".into());
         }
-        if json && dump_cert.as_deref() == Some(Path::new("-")) {
+        if json && dump_cert.as_deref() == Some(Path::new("-"))
+        {
             return Err("--json cannot be used with --dump-cert -".into());
         }
     }
 
-    if json && max_bytes.is_none() {
+    if (json || script.is_some()) && max_bytes.is_none()
+    {
         max_bytes = Some(1024 * 1024);
     }
 
@@ -227,6 +272,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
         dump_cert,
         tls_info,
         commands,
+        script,
         expect,
         idle_timeout,
         connect_timeout,
@@ -243,17 +289,20 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>> {
 async fn load_ca_certificates(
     root_store: &mut rustls::RootCertStore,
     path: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>>
+{
     let contents = tokio::fs::read(path)
         .await
         .map_err(|err| format!("Cannot read certificate file {}: {err}", path.display()))?;
     let mut certs = CertificateDer::pem_slice_iter(&contents)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Invalid certificate file {}: {err}", path.display()))?;
-    if certs.is_empty() {
+    if certs.is_empty()
+    {
         certs.push(CertificateDer::from(contents));
     }
-    for cert in certs {
+    for cert in certs
+    {
         root_store
             .add(cert)
             .map_err(|err| format!("Invalid certificate in {}: {err}", path.display()))?;
@@ -264,19 +313,25 @@ async fn load_ca_certificates(
 async fn connect_tls(
     config: &Config,
     report: &mut Report,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error>> {
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error>>
+{
     report.phase = "certificate";
-    let client_config = if config.insecure || config.dump_cert.is_some() {
+    let client_config = if config.insecure || config.dump_cert.is_some()
+    {
         rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(NoVerifier::new())
             .with_no_client_auth()
-    } else {
+    }
+    else
+    {
         let mut root_store = rustls::RootCertStore::empty();
-        if !config.no_default_ca {
+        if !config.no_default_ca
+        {
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
-        for path in &config.ca_certs {
+        for path in &config.ca_certs
+        {
             load_ca_certificates(&mut root_store, path).await?;
         }
         rustls::ClientConfig::builder()
@@ -292,7 +347,8 @@ async fn connect_tls(
     let stream = connect_tcp(config, report).await?;
     report.phase = "tls";
     let stream = connector.connect(server_name, stream).await?;
-    if config.json || config.tls_info {
+    if config.json || config.tls_info
+    {
         report.tls = Some(tls_info::inspect(
             stream.get_ref().1,
             !config.insecure && config.dump_cert.is_none(),
@@ -301,7 +357,8 @@ async fn connect_tls(
     Ok(stream)
 }
 
-async fn connect_tcp(config: &Config, report: &mut Report) -> Result<TcpStream, Box<dyn Error>> {
+async fn connect_tcp(config: &Config, report: &mut Report) -> Result<TcpStream, Box<dyn Error>>
+{
     report.phase = "dns";
     let addresses: Vec<_> = tokio::net::lookup_host((config.host.as_str(), config.port))
         .await?
@@ -312,10 +369,14 @@ async fn connect_tcp(config: &Config, report: &mut Report) -> Result<TcpStream, 
     Ok(stream)
 }
 
-async fn connect(config: &Config, report: &mut Report) -> Result<DynStream, Box<dyn Error>> {
-    if config.tls {
+async fn connect(config: &Config, report: &mut Report) -> Result<DynStream, Box<dyn Error>>
+{
+    if config.tls
+    {
         Ok(Box::new(connect_tls(config, report).await?))
-    } else {
+    }
+    else
+    {
         Ok(Box::new(connect_tcp(config, report).await?))
     }
 }
@@ -324,7 +385,8 @@ async fn dump_certificate(
     config: &Config,
     path: &Path,
     report: &mut Report,
-) -> Result<u8, Box<dyn Error>> {
+) -> Result<u8, Box<dyn Error>>
+{
     let mut stream = tokio::time::timeout(config.connect_timeout, connect_tls(config, report))
         .await
         .map_err(|_| {
@@ -338,7 +400,8 @@ async fn dump_certificate(
         .ok_or("Server did not provide a certificate")?;
     let encoded = STANDARD.encode(certificate.as_ref());
     let mut pem = b"-----BEGIN CERTIFICATE-----\n".to_vec();
-    for line in encoded.as_bytes().chunks(64) {
+    for line in encoded.as_bytes().chunks(64)
+    {
         pem.extend_from_slice(line);
         pem.push(b'\n');
     }
@@ -347,9 +410,12 @@ async fn dump_certificate(
 
     report.phase = "output";
     let write_result = async {
-        let mut output: Box<dyn AsyncWrite + Unpin> = if path == Path::new("-") {
+        let mut output: Box<dyn AsyncWrite + Unpin> = if path == Path::new("-")
+        {
             Box::new(io::stdout())
-        } else {
+        }
+        else
+        {
             Box::new(
                 tokio::fs::OpenOptions::new()
                     .write(true)
@@ -363,20 +429,23 @@ async fn dump_certificate(
     }
     .await;
     write_result.map_err(|err| format!("Cannot write certificate to {}: {err}", path.display()))?;
-    if !config.quiet {
+    if !config.quiet
+    {
         eprintln!("Saved unverified server certificate to {}.", path.display());
     }
     Ok(report.finish(0, "certificate_dumped"))
 }
 
-async fn inspect_tls(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>> {
+async fn inspect_tls(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
+{
     let mut stream = tokio::time::timeout(config.connect_timeout, connect_tls(config, report))
         .await
         .map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::TimedOut, "connect/handshake timed out")
         })??;
     let _ = stream.shutdown().await;
-    if !config.json {
+    if !config.json
+    {
         report.phase = "output";
         let mut bytes = serde_json::to_vec_pretty(&report.tls)?;
         bytes.push(b'\n');
@@ -390,15 +459,18 @@ async fn inspect_tls(config: &Config, report: &mut Report) -> Result<u8, Box<dyn
 #[derive(Debug)]
 struct NoVerifier(std::sync::Arc<rustls::crypto::CryptoProvider>);
 
-impl NoVerifier {
-    fn new() -> std::sync::Arc<Self> {
+impl NoVerifier
+{
+    fn new() -> std::sync::Arc<Self>
+    {
         std::sync::Arc::new(Self(
             std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
         ))
     }
 }
 
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+impl rustls::client::danger::ServerCertVerifier for NoVerifier
+{
     fn verify_server_cert(
         &self,
         _end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -406,7 +478,8 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
         _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp: &[u8],
         _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error>
+    {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
@@ -415,7 +488,8 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
         message: &[u8],
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
         rustls::crypto::verify_tls12_signature(
             message,
             cert,
@@ -429,7 +503,8 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
         message: &[u8],
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
         rustls::crypto::verify_tls13_signature(
             message,
             cert,
@@ -438,14 +513,17 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
         )
     }
 
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme>
+    {
         self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
 /// Sends `-c` lines, then closes the channel.
-fn spawn_commands(config: &Config, tx: mpsc::UnboundedSender<Vec<u8>>) {
-    for cmd in &config.commands {
+fn spawn_commands(config: &Config, tx: mpsc::UnboundedSender<Vec<u8>>)
+{
+    for cmd in &config.commands
+    {
         let mut line = cmd.clone().into_bytes();
         line.extend_from_slice(config.eol);
         let _ = tx.send(line);
@@ -453,33 +531,43 @@ fn spawn_commands(config: &Config, tx: mpsc::UnboundedSender<Vec<u8>>) {
 }
 
 /// Reads piped stdin; lines are re-terminated with `eol` unless `raw`.
-fn spawn_stdin(raw: bool, eol: &'static [u8], tx: mpsc::UnboundedSender<Vec<u8>>) {
+fn spawn_stdin(raw: bool, eol: &'static [u8], tx: mpsc::UnboundedSender<Vec<u8>>)
+{
     tokio::spawn(async move {
         let mut stdin = io::BufReader::new(io::stdin());
         let mut buf = Vec::new();
-        loop {
+        loop
+        {
             buf.clear();
-            let n = if raw {
+            let n = if raw
+            {
                 buf.resize(4096, 0);
                 let n = stdin.read(&mut buf).await.unwrap_or(0);
                 buf.truncate(n);
                 n
-            } else {
+            }
+            else
+            {
                 stdin.read_until(b'\n', &mut buf).await.unwrap_or(0)
             };
-            if n == 0 {
+            if n == 0
+            {
                 break;
             }
-            if !raw {
-                if buf.last() == Some(&b'\n') {
+            if !raw
+            {
+                if buf.last() == Some(&b'\n')
+                {
                     buf.pop();
                 }
-                if buf.last() == Some(&b'\r') {
+                if buf.last() == Some(&b'\r')
+                {
                     buf.pop();
                 }
                 buf.extend_from_slice(eol);
             }
-            if tx.send(buf.clone()).is_err() {
+            if tx.send(buf.clone()).is_err()
+            {
                 break;
             }
         }
@@ -487,25 +575,32 @@ fn spawn_stdin(raw: bool, eol: &'static [u8], tx: mpsc::UnboundedSender<Vec<u8>>
 }
 
 /// Interactive rustyline input; the channel closes on /quit, /exit or EOF.
-fn spawn_readline(eol: &'static [u8], tx: mpsc::UnboundedSender<Vec<u8>>) {
+fn spawn_readline(eol: &'static [u8], tx: mpsc::UnboundedSender<Vec<u8>>)
+{
     tokio::task::spawn_blocking(move || {
         let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
             .expect("failed to initialize rustyline");
-        loop {
-            match rl.readline("") {
-                Ok(line) => {
-                    if line == "/quit" || line == "/exit" {
+        loop
+        {
+            match rl.readline("")
+            {
+                Ok(line) =>
+                {
+                    if line == "/quit" || line == "/exit"
+                    {
                         break;
                     }
                     let mut bytes = line.into_bytes();
                     bytes.extend_from_slice(eol);
-                    if tx.send(bytes).is_err() {
+                    if tx.send(bytes).is_err()
+                    {
                         break;
                     }
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => continue,
                 Err(rustyline::error::ReadlineError::Eof) => break,
-                Err(err) => {
+                Err(err) =>
+                {
                     eprintln!("Readline error: {err}");
                     break;
                 }
@@ -515,13 +610,16 @@ fn spawn_readline(eol: &'static [u8], tx: mpsc::UnboundedSender<Vec<u8>>) {
 }
 
 /// Substring search across read chunks; keeps the last `pattern.len() - 1` bytes.
-struct Matcher {
+struct Matcher
+{
     pattern: Vec<u8>,
     window: Vec<u8>,
 }
 
-impl Matcher {
-    fn feed(&mut self, chunk: &[u8]) -> bool {
+impl Matcher
+{
+    fn feed(&mut self, chunk: &[u8]) -> bool
+    {
         self.window.extend_from_slice(chunk);
         if self
             .window
@@ -531,36 +629,74 @@ impl Matcher {
             return true;
         }
         let keep = self.pattern.len() - 1;
-        if self.window.len() > keep {
+        if self.window.len() > keep
+        {
             self.window.drain(..self.window.len() - keep);
         }
         false
     }
 }
 
-async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>> {
-    if config.tls_info {
+async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
+{
+    if config.tls_info
+    {
         return inspect_tls(config, report).await;
     }
-    if let Some(path) = &config.dump_cert {
+    if let Some(path) = &config.dump_cert
+    {
         return dump_certificate(config, path, report).await;
     }
-    let stream = tokio::time::timeout(config.connect_timeout, connect(config, report))
+    let script = if let Some(path) = &config.script
+    {
+        report.phase = "script";
+        report.script_steps = Some(Vec::new());
+        let source = script::read(path)
+            .await
+            .map_err(|err| format!("Cannot read script {}: {err}", path.display()))?;
+        match script::parse(&source, path, config.eol)
+        {
+            Ok(script) => Some(script),
+            Err(err) =>
+            {
+                report.error = Some(format!("Invalid script {}: {err}", path.display()));
+                if !config.json
+                {
+                    eprintln!("Error: {}", report.error.as_deref().unwrap_or_default());
+                }
+                return Ok(report.finish(EXIT_USAGE, "invalid_script"));
+            }
+        }
+    }
+    else
+    {
+        None
+    };
+    let mut stream = tokio::time::timeout(config.connect_timeout, connect(config, report))
         .await
         .map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::TimedOut, "connect/handshake timed out")
         })??;
+    if let Some(script) = &script
+    {
+        return script::run(script, &mut stream, config, report).await;
+    }
     let (read_half, mut write_half) = io::split(stream);
     let mut socket_reader = io::BufReader::new(read_half);
     let mut socket_buf = vec![0u8; 8192];
 
     let interactive = !config.json && config.commands.is_empty() && std::io::stdin().is_terminal();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    if !config.commands.is_empty() {
+    if !config.commands.is_empty()
+    {
         spawn_commands(config, tx);
-    } else if interactive {
+    }
+    else if interactive
+    {
         spawn_readline(config.eol, tx);
-    } else {
+    }
+    else
+    {
         spawn_stdin(config.raw, config.eol, tx);
     }
 
@@ -569,26 +705,32 @@ async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
         window: Vec::new(),
     });
 
-    if !config.quiet {
-        if interactive {
+    if !config.quiet
+    {
+        if interactive
+        {
             eprintln!(
                 "Connected to {}:{} (tls: {}). Type /quit to exit.",
                 config.host, config.port, config.tls
             );
-        } else {
+        }
+        else
+        {
             eprintln!("Connected to {}:{} (tls: {}).", config.host, config.port, config.tls);
         }
     }
 
     let mut stdout = io::stdout();
     let mut input_open = true;
-    loop {
+    loop
+    {
         report.phase = "read";
         let read_size = config.max_bytes.map_or(socket_buf.len(), |limit| {
             (limit - report.bytes_received).min(socket_buf.len() as u64) as usize
         });
         let idle = async {
-            match config.idle_timeout {
+            match config.idle_timeout
+            {
                 Some(d) => tokio::time::sleep(d).await,
                 None => std::future::pending().await,
             }
@@ -662,18 +804,24 @@ async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
     }
 
     let _ = write_half.shutdown().await;
-    let code = if matcher.is_some() {
+    let code = if matcher.is_some()
+    {
         EXIT_EXPECT_FAILED
-    } else {
+    }
+    else
+    {
         0
     };
     Ok(report.finish(code, report.reason))
 }
 
-fn json_requested(arguments: &[String]) -> bool {
+fn json_requested(arguments: &[String]) -> bool
+{
     let mut args = arguments.iter();
-    while let Some(arg) = args.next() {
-        if arg == "--json" {
+    while let Some(arg) = args.next()
+    {
+        if arg == "--json"
+        {
             return true;
         }
         if matches!(
@@ -689,14 +837,17 @@ fn json_requested(arguments: &[String]) -> bool {
                 | "--max-time"
                 | "--max-bytes"
                 | "--server-name"
-        ) {
+                | "--script"
+        )
+        {
             args.next();
         }
     }
     false
 }
 
-async fn emit_report(report: &Report) -> Result<(), Box<dyn Error>> {
+async fn emit_report(report: &Report) -> Result<(), Box<dyn Error>>
+{
     let mut bytes = serde_json::to_vec(&report.json())?;
     bytes.push(b'\n');
     let mut output = io::stdout();
@@ -705,18 +856,25 @@ async fn emit_report(report: &Report) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn async_main() -> ExitCode {
+async fn async_main() -> ExitCode
+{
     let arguments: Vec<_> = env::args().skip(1).collect();
     let mut report = Report::new();
-    let config = match parse_args(&arguments) {
+    let config = match parse_args(&arguments)
+    {
         Ok(config) => config,
-        Err(err) => {
-            if json_requested(&arguments) {
+        Err(err) =>
+        {
+            if json_requested(&arguments)
+            {
                 report.error = Some(err.to_string());
-                if let Err(err) = emit_report(&report).await {
+                if let Err(err) = emit_report(&report).await
+                {
                     eprintln!("Error: {err}");
                 }
-            } else {
+            }
+            else
+            {
                 eprintln!("Error: {err}");
                 print_usage();
             }
@@ -724,11 +882,15 @@ async fn async_main() -> ExitCode {
         }
     };
 
-    let result = match config.max_time {
-        Some(limit) => match tokio::time::timeout(limit, run(&config, &mut report)).await {
+    let result = match config.max_time
+    {
+        Some(limit) => match tokio::time::timeout(limit, run(&config, &mut report)).await
+        {
             Ok(result) => result,
-            Err(_) => {
-                if !config.quiet {
+            Err(_) =>
+            {
+                if !config.quiet
+                {
                     eprintln!("Total time limit reached.");
                 }
                 Ok(report.finish(EXIT_LIMIT, "max_time"))
@@ -736,19 +898,25 @@ async fn async_main() -> ExitCode {
         },
         None => run(&config, &mut report).await,
     };
-    let code = match result {
+    let code = match result
+    {
         Ok(code) => code,
-        Err(err) => {
+        Err(err) =>
+        {
             report.fail(err.as_ref());
-            if !config.json {
+            if !config.json
+            {
                 eprintln!("Error: {err}");
             }
             EXIT_ERROR
         }
     };
-    if config.json {
-        let emitted = match config.max_time {
-            Some(limit) => {
+    if config.json
+    {
+        let emitted = match config.max_time
+        {
+            Some(limit) =>
+            {
                 match tokio::time::timeout(report.output_budget(limit), emit_report(&report)).await
                 {
                     Ok(result) => result,
@@ -757,7 +925,8 @@ async fn async_main() -> ExitCode {
             }
             None => emit_report(&report).await,
         };
-        if let Err(err) = emitted {
+        if let Err(err) = emitted
+        {
             eprintln!("Error: {err}");
             return ExitCode::from(EXIT_ERROR);
         }
@@ -765,13 +934,15 @@ async fn async_main() -> ExitCode {
     ExitCode::from(code)
 }
 
-fn main() -> ExitCode {
+fn main() -> ExitCode
+{
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => {
+        Err(err) =>
+        {
             eprintln!("Error: {err}");
             return ExitCode::from(EXIT_ERROR);
         }

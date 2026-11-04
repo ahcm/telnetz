@@ -1,0 +1,27 @@
+version = 1
+step_timeout = 2
+
+[[steps]]
+name = 'greeting'
+expect = '220 '
+else = [{ fail = 'No SMTP greeting' }]
+
+[[steps]]
+send_line = 'EHLO agent.example'
+
+# A space after 250 marks the last line of an SMTP multiline reply.
+[[steps]]
+name = 'capabilities'
+expect = [
+  { text = '250 ' },
+  { text = '550 ', then = [{ fail = 'EHLO rejected' }] },
+]
+
+[[steps]]
+send_line = 'QUIT'
+
+[[steps]]
+expect = '221 '
+
+[[steps]]
+expect_eof = true
