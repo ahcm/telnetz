@@ -52,6 +52,7 @@
 - `--tls-info` returns negotiated protocol/cipher and metadata for the server's presented certificate chain, then exits.
 - Verification stays enabled by default. Explicit `--insecure` is reported as skipped verification.
 - SHA-256 fingerprints use `sha2`; certificate names, SANs, and validity use `x509-cert`.
+- `x509-cert` 0.3 renames `TbsCertificate::get` to `get_extension`; certificate accessors return references.
 - Metadata parse failures are reported per certificate, independently of handshake verification.
 - Tests compare fingerprints with Python hashlib and validity timestamps with OpenSSL output.
 - Inspection tests cover TLS 1.2/1.3, typed DNS/IPv4/IPv6/URI/email SANs, chain order, expired certificates, and open stdin with no application data.
