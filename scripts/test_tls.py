@@ -59,16 +59,26 @@ class CertificateTests(unittest.TestCase):
         stack = contextlib.ExitStack()
         cls.addClassCleanup(stack.close)
         cls.directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="telnetz-tls-")))
-        for name in ("server", "other", "inspect"):
+        for name in ("server", "other", "inspect", "ca-server", "ca-server-critical", "ca-client-only", "ca-unknown-critical"):
             names = "DNS:localhost"
             if name == "inspect":
                 names += ",IP:127.0.0.1,IP:2001:db8::1,URI:spiffe://local/service,email:agent@example.test"
+            constraints = "CA:TRUE" if name.startswith("ca-") else "critical,CA:FALSE"
+            if name == "ca-server-critical":
+                constraints = "critical,CA:TRUE"
+            extensions = []
+            if name == "ca-server-critical":
+                extensions = ["-addext", "extendedKeyUsage=serverAuth"]
+            elif name == "ca-client-only":
+                extensions = ["-addext", "extendedKeyUsage=clientAuth"]
+            elif name == "ca-unknown-critical":
+                extensions = ["-addext", "1.2.3.4=critical,DER:05:00"]
             subprocess.run(
                 [
                     "openssl", "req", "-x509", "-newkey", "ec",
                     "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "2",
                     "-subj", f"/CN={name}", "-addext", f"subjectAltName={names}",
-                    "-addext", "basicConstraints=critical,CA:FALSE",
+                    "-addext", f"basicConstraints={constraints}", *extensions,
                     "-keyout", str(cls.directory / f"{name}.key"),
                     "-out", str(cls.directory / f"{name}.crt"),
                 ],
@@ -112,6 +122,114 @@ class CertificateTests(unittest.TestCase):
                     self.assert_connected(
                         self.client("--tls", *options, "--cacert", paths[0], "--cacert", paths[1])
                     )
+
+    def test_ca_marked_leaf_explicit_import(self):
+        for name in ("ca-server", "ca-server-critical"):
+            cert = self.directory / f"{name}.crt"
+            key = self.directory / f"{name}.key"
+            der = self.directory / f"{name}.der"
+            der.write_bytes(ssl.PEM_cert_to_DER_cert(cert.read_text()))
+            bundle = self.directory / f"{name}-bundle.pem"
+            bundle.write_bytes(self.cert.read_bytes() + cert.read_bytes())
+            for version in (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3):
+                with tls_server(cert, key, tls_version=version) as port:
+                    for path in (cert, der, bundle):
+                        for options in ((), ("--no-default-ca",)):
+                            with self.subTest(name=name, version=version, path=path, options=options):
+                                result = self.client("--tls", "--cacert", path, *options, port=port)
+                                self.assert_connected(result)
+
+    def test_ca_marked_leaf_keeps_hostname_checks(self):
+        cert = self.directory / "ca-server.crt"
+        key = self.directory / "ca-server.key"
+        with tls_server(cert, key) as port:
+            wrong = self.client("--tls", "--cacert", cert, "--json", host="127.0.0.1", port=port)
+            self.assertEqual(wrong.returncode, 1)
+            self.assertEqual(json.loads(wrong.stdout)["reason"], "hostname_mismatch")
+            info = self.client(
+                "--tls", "--tls-info", "--cacert", cert, "--server-name", "localhost", "--json",
+                host="127.0.0.1", port=port, expect=None,
+            )
+            self.assertEqual(info.returncode, 0, info.stderr)
+            self.assertEqual(json.loads(info.stdout)["tls"]["verification"], "verified")
+
+    def test_ca_marked_leaf_requires_identical_import(self):
+        cert = self.directory / "ca-server.crt"
+        key = self.directory / "ca-server.key"
+        reissued = self.directory / "ca-reissued.crt"
+        subprocess.run([
+            "openssl", "x509", "-in", str(cert), "-signkey", str(key), "-set_serial", "123456",
+            "-out", str(reissued), "-days", "2",
+        ], check=True, capture_output=True)
+        for presented in (cert, reissued):
+            with tls_server(presented, key) as port:
+                options = [(), ("--cacert", self.cert)]
+                if presented == reissued:
+                    options.append(("--cacert", cert))
+                for imported in options:
+                    with self.subTest(presented=presented, imported=imported):
+                        rejected = self.client("--tls", *imported, "--json", port=port)
+                        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+                        self.assertIn("CaUsedAsEndEntity", json.loads(rejected.stdout)["error"])
+
+    def test_ca_marked_leaf_rejects_purpose_and_critical_extensions(self):
+        for name in ("ca-client-only", "ca-unknown-critical"):
+            cert = self.directory / f"{name}.crt"
+            key = self.directory / f"{name}.key"
+            with self.subTest(name=name):
+                with tls_server(cert, key) as port:
+                    rejected = self.client("--tls", "--cacert", cert, "--json", port=port)
+                self.assertEqual(rejected.returncode, 1, rejected.stdout)
+                error = json.loads(rejected.stdout)["error"]
+                self.assertIn("InvalidPurpose" if name == "ca-client-only" else "UnsupportedCriticalExtension", error)
+
+    def test_imported_ca_still_verifies_issued_leaves(self):
+        ca = self.directory / "ca-server.crt"
+        ca_key = self.directory / "ca-server.key"
+        csr = self.directory / "issued.csr"
+        cert = self.directory / "issued.crt"
+        extensions = self.directory / "issued.ext"
+        extensions.write_text("basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n")
+        subprocess.run([
+            "openssl", "req", "-new", "-key", str(self.key), "-subj", "/CN=issued", "-out", str(csr),
+        ], check=True, capture_output=True)
+        subprocess.run([
+            "openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca), "-CAkey", str(ca_key),
+            "-set_serial", "234567", "-days", "2", "-extfile", str(extensions), "-out", str(cert),
+        ], check=True, capture_output=True)
+        with tls_server(cert, self.key) as port:
+            self.assert_connected(self.client("--tls", "--no-default-ca", "--cacert", ca, port=port))
+
+    def test_ca_marked_leaf_keeps_validity_checks(self):
+        config = self.directory / "ca-validity.cnf"
+        config.write_text(
+            "[ca]\ndefault_ca = local\n[local]\ndatabase = ca-index.txt\nserial = ca-serial\n"
+            "default_md = sha256\npolicy = policy\nx509_extensions = server\n"
+            "[policy]\ncommonName = supplied\n[server]\nbasicConstraints = CA:TRUE\nsubjectAltName = DNS:localhost\n"
+        )
+        (self.directory / "ca-index.txt").write_text("")
+        (self.directory / "ca-serial").write_text("01\n")
+        ca = self.directory / "ca-server.crt"
+        key = self.directory / "ca-server.key"
+        for name, start, end, reason in (
+            ("expired-ca", "20200101000000Z", "20210101000000Z", "certificate_expired"),
+            ("future-ca", "20990101000000Z", "21000101000000Z", "certificate_not_yet_valid"),
+        ):
+            cert = self.directory / f"{name}.crt"
+            csr = self.directory / f"{name}.csr"
+            subprocess.run([
+                "openssl", "req", "-new", "-key", str(key), "-subj", f"/CN={name}", "-out", str(csr),
+            ], check=True, capture_output=True)
+            subprocess.run([
+                "openssl", "ca", "-batch", "-selfsign", "-config", str(config), "-in", str(csr),
+                "-keyfile", str(key), "-cert", str(ca), "-out", str(cert), "-outdir", str(self.directory),
+                "-notext", "-startdate", start, "-enddate", end,
+            ], cwd=self.directory, check=True, capture_output=True)
+            with self.subTest(name=name):
+                with tls_server(cert, key) as port:
+                    rejected = self.client("--tls", "--cacert", cert, "--json", port=port)
+                self.assertEqual(rejected.returncode, 1, rejected.stdout)
+                self.assertEqual(json.loads(rejected.stdout)["reason"], reason)
 
     def test_untrusted_certificate(self):
         for options in (

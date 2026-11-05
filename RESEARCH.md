@@ -2,13 +2,22 @@
 
 - `--tls --cacert server.crt` adds certificates to the built-in webpki roots for one invocation.
 - `--no-default-ca` excludes built-in roots; verified TLS then trusts only `--cacert` files.
-- With `--no-default-ca` and no imported certificates, verification rejects server certificates with `UnknownIssuer`.
+- With `--no-default-ca` and no imported certificates, no server is trusted; otherwise valid ordinary leaves fail with `UnknownIssuer`.
 - `--no-default-ca` requires `--tls`; it does not change the verification bypass in `--insecure` or `--dump-cert` mode.
 - Files may contain PEM certificates, a PEM bundle, or one DER certificate. `--cacert` is repeatable.
 - rustls still verifies certificate signatures, validity, usage, and subject alternative names.
 - Unreadable or invalid certificate files fail before connecting, with the file path in the error (exit 1).
 - Missing `--tls`, conflicting `--insecure`, or a missing file argument is a usage error (exit 2).
 - PEM decoding uses rustls's re-exported `pki_types::pem::PemObject`; no dependencies were added.
+
+## Imported CA-marked server certificates
+
+- webpki rejects `CA:TRUE` in the end-entity role with `CaUsedAsEndEntity` before checking EKU or hostname.
+- A custom verifier first runs normal webpki validation. Only that role error, plus an exact DER match to an explicit import, enables direct leaf trust.
+- The direct path checks validity, server-authentication EKU when present, and SAN identity. Standard parsing still rejects unsupported critical extensions.
+- TLS 1.2/1.3 handshake signature verification delegates to the standard verifier. CA-issued ordinary leaves retain normal chain validation.
+- Tests reject wrong identities, expired/future certificates, client-only EKU, unsupported critical extensions, and a reissued certificate with the same key.
+- Live verification on 2026-11-05 completed TLS 1.3 against the router with its imported certificate and `--server-name fritz.box`.
 
 # TLS certificate export
 
@@ -68,8 +77,8 @@
 
 ## Verification
 
-All 57 regression tests passed against the release binary: 22 conversation tests,
-14 agent/TCP tests, and 21 TLS tests. The release build, Cargo tests, Clippy with
+All 63 regression tests passed against the release binary: 22 conversation tests,
+14 agent/TCP tests, and 27 TLS tests. The release build, Cargo tests, Clippy with
 warnings denied, nightly formatting, and whitespace checks passed.
 
 ```sh

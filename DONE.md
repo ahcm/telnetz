@@ -1,5 +1,7 @@
 # Completed
 
+- Added direct trust for an exactly imported CA-marked server certificate while retaining identity, validity, purpose, and TLS signature checks.
+
 - Added JSON/TOML conversation scripts with one validated step model.
 - Added literal alternatives, success/failure branches, EOF handling, exact/binary sends, and per-step deadlines.
 - Added bounded matching buffers, global limit enforcement, per-step JSON traces, and SMTP examples.

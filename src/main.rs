@@ -15,6 +15,7 @@ use tokio_rustls::TlsConnector;
 mod report;
 mod script;
 mod tls_info;
+mod verify;
 use report::Report;
 
 trait StreamLike: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -289,7 +290,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
 async fn load_ca_certificates(
     root_store: &mut rustls::RootCertStore,
     path: &Path,
-) -> Result<(), Box<dyn Error>>
+) -> Result<Vec<CertificateDer<'static>>, Box<dyn Error>>
 {
     let contents = tokio::fs::read(path)
         .await
@@ -301,13 +302,13 @@ async fn load_ca_certificates(
     {
         certs.push(CertificateDer::from(contents));
     }
-    for cert in certs
+    for cert in &certs
     {
         root_store
-            .add(cert)
+            .add(cert.clone())
             .map_err(|err| format!("Invalid certificate in {}: {err}", path.display()))?;
     }
-    Ok(())
+    Ok(certs)
 }
 
 async fn connect_tls(
@@ -330,13 +331,26 @@ async fn connect_tls(
         {
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
+        let mut imported = Vec::new();
         for path in &config.ca_certs
         {
-            load_ca_certificates(&mut root_store, path).await?;
+            imported.extend(load_ca_certificates(&mut root_store, path).await?);
         }
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
+        if imported.is_empty()
+        {
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        }
+        else
+        {
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verify::ImportedCertificateVerifier::new(
+                    root_store, imported,
+                )?)
+                .with_no_client_auth()
+        }
     };
 
     let connector = TlsConnector::from(std::sync::Arc::new(client_config));

@@ -99,6 +99,8 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
 - JSON TLS results include `tls.protocol_version`, `cipher_suite`, `verification`, and leaf-first `certificates`.
   `--tls-info` sends no application data. Use explicit `--insecure` for untrusted/expired peers; metadata reports verification as skipped.
 - Use `--cacert server.crt` for self-signed servers; hostname and expiry checks still apply.
+- Imported CA-marked server certificates require an exact certificate match for direct trust.
+  When an IP is absent from the SANs, connect to the IP with `--server-name` set to a listed DNS name.
 - Add `--no-default-ca` to exclude bundled CAs. With verification enabled and no `--cacert`, all server certificates are rejected.
 - `--dump-cert` skips trust, hostname, and expiry checks and sends no application data.
   It cannot be combined with `--cacert`, `--command`, or `--expect`.

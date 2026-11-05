@@ -72,6 +72,19 @@ roots for this invocation. Hostname and expiry checks still apply; the host must
 match the certificate's subject alternative name. `--cacert` requires `--tls`
 and cannot be combined with `--insecure`.
 
+Some devices use a certificate marked `CA:TRUE` as their TLS server certificate.
+An identical certificate supplied with `--cacert` can be trusted directly in this
+case. The exception requires an exact DER match. Validity dates, server-authentication
+purpose, unrecognized critical extensions, hostname SANs, and TLS handshake signatures
+are still checked. Other certificates continue through normal chain verification.
+
+When connecting by IP to a device whose certificate contains only DNS names, use
+`--server-name` with a name from its SANs:
+
+```sh
+telnetz 192.168.1.1 443 --tls --tls-info --cacert fritz.ca --server-name fritz.box
+```
+
 Use `--no-default-ca` to trust only certificates supplied with `--cacert`:
 
 ```sh
