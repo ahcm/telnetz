@@ -57,47 +57,52 @@ struct Config
     json: bool,
 }
 
+/// Literal newlines: a `\` line continuation strips the next line's indentation.
+/// Options start at column 2, descriptions at column 25.
+const USAGE: &str = "\
+Usage: telnetz <host> <port> [options]
+
+Options:
+  --tls                  Use TLS for the connection.
+  --starttls <PROTO>     Upgrade to TLS via PROTO: smtp, lmtp, imap,
+                         pop3, ftp, nntp, sieve, or postgres.
+  --ehlo <NAME>          EHLO/LHLO argument for --starttls smtp/lmtp
+                         (default: local address literal).
+  --server-name <NAME>   Override TLS SNI and certificate hostname.
+  --insecure             Skip certificate validation (TLS only).
+  --no-default-ca        Ignore bundled CA certificates (TLS only).
+  --cacert <FILE>        Trust extra PEM/DER certificates (TLS only;
+                         repeatable).
+  --dump-cert <FILE>     Save unverified server PEM and exit (TLS only).
+                         Use - for stdout; existing files are preserved.
+  --tls-info             Inspect TLS and certificates, then exit.
+  -c, --command <LINE>   Send LINE (repeatable); stdin is not read.
+  --script <FILE>        Run a JSON/TOML conversation script.
+  --expect <TEXT>        Exit 0 as soon as TEXT appears in the output,
+                         exit 3 if the connection ends without it.
+  -w, --timeout <SECS>   Exit after SECS without traffic.
+  --connect-timeout <SECS>
+                         Connect/STARTTLS/handshake timeout (default 10).
+  --max-time <SECS>      Limit total connection/session time.
+  --max-bytes <BYTES>    Limit received application bytes (positive).
+  --lf                   Terminate lines with LF instead of CRLF.
+  --raw                  Forward stdin bytes unchanged.
+  --shutdown-write       Signal EOF after input; keep reading replies.
+  -q, --quiet            No status messages on stderr.
+  --json                 Emit one JSON result (default byte cap 1 MiB).
+  -h, --help             Show this help.
+
+If stdin is a terminal, lines are read interactively; /quit or /exit
+ends the session. Otherwise stdin (or -c) is sent and output is read
+until the remote closes, --expect matches or -w expires.
+
+Exit codes: 0 ok, 1 connection/IO error, 2 usage error,
+3 --expect text not seen, 4 hard limit reached.
+";
+
 fn print_usage()
 {
-    eprintln!(
-        "Usage: telnetz <host> <port> [options]\n\
-         \n\
-         Options:\n\
-           --tls                  Use TLS for the connection.\n\
-           --starttls <PROTO>     Upgrade to TLS via PROTO: smtp, lmtp, imap,\n\
-                                  pop3, ftp, nntp, sieve, or postgres.\n\
-           --ehlo <NAME>          EHLO/LHLO argument for --starttls smtp/lmtp\n\
-                                  (default: local address literal).\n\
-           --server-name <NAME>   Override TLS SNI and certificate hostname.\n\
-           --insecure             Skip certificate validation (TLS only).\n\
-           --no-default-ca        Ignore bundled CA certificates (TLS only).\n\
-           --cacert <FILE>        Trust extra PEM/DER certificates (TLS only;\n\
-                                  repeatable).\n\
-           --dump-cert <FILE>     Save unverified server PEM and exit (TLS only).\n\
-                                  Use - for stdout; existing files are preserved.\n\
-           --tls-info             Inspect TLS and certificates, then exit.\n\
-           -c, --command <LINE>   Send LINE (repeatable); stdin is not read.\n\
-           --script <FILE>        Run a JSON/TOML conversation script.\n\
-           --expect <TEXT>        Exit 0 as soon as TEXT appears in the output,\n\
-                                  exit 3 if the connection ends without it.\n\
-           -w, --timeout <SECS>   Exit after SECS without traffic.\n\
-           --connect-timeout <SECS>  Connect/STARTTLS/handshake timeout (default 10).\n\
-           --max-time <SECS>      Limit total connection/session time.\n\
-           --max-bytes <BYTES>    Limit received application bytes (positive).\n\
-           --lf                   Terminate lines with LF instead of CRLF.\n\
-           --raw                  Forward stdin bytes unchanged.\n\
-           --shutdown-write       Signal EOF after input; keep reading replies.\n\
-           -q, --quiet            No status messages on stderr.\n\
-           --json                 Emit one JSON result (default byte cap 1 MiB).\n\
-           -h, --help             Show this help.\n\
-         \n\
-         If stdin is a terminal, lines are read interactively; /quit or /exit\n\
-         ends the session. Otherwise stdin (or -c) is sent and output is read\n\
-         until the remote closes, --expect matches or -w expires.\n\
-         \n\
-         Exit codes: 0 ok, 1 connection/IO error, 2 usage error,\n\
-         3 --expect text not seen, 4 hard limit reached.\n"
-    );
+    eprintln!("{USAGE}");
 }
 
 fn parse_secs(flag: &str, value: &str) -> Result<Duration, Box<dyn Error>>
