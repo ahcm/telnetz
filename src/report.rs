@@ -110,6 +110,10 @@ impl Report
 
     fn classify(&self, error: &(dyn Error + 'static)) -> &'static str
     {
+        if let Some(starttls) = error.downcast_ref::<crate::starttls::Error>()
+        {
+            return starttls.reason;
+        }
         if let Some(rustls::Error::InvalidCertificate(cert)) = error.downcast_ref::<rustls::Error>()
         {
             use rustls::CertificateError::*;
@@ -144,6 +148,7 @@ impl Report
             "dns" => "dns_error",
             "connect" => "connect_error",
             "tls" => "tls_error",
+            "starttls" => "starttls_error",
             "certificate" => "invalid_certificate_file",
             "output" => "output_error",
             "write" => "write_error",

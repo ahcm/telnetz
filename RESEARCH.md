@@ -77,8 +77,8 @@
 
 ## Verification
 
-All 63 regression tests passed against the release binary: 22 conversation tests,
-14 agent/TCP tests, and 27 TLS tests. The release build, Cargo tests, Clippy with
+All 78 regression tests passed against the release binary: 22 conversation tests,
+14 agent/TCP tests, 27 TLS tests, and 15 STARTTLS tests. The release build, Cargo tests, Clippy with
 warnings denied, nightly formatting, and whitespace checks passed.
 
 ```sh
@@ -86,6 +86,7 @@ cargo build --offline
 python3 scripts/test_tls.py
 python3 scripts/test_agent.py
 python3 scripts/test_scripts.py
+python3 scripts/test_starttls.py
 cargo test --offline
 cargo clippy --offline --all-targets -- -D warnings
 cargo +nightly fmt --check

@@ -6,4 +6,5 @@
 - Discuss bounded loops/retries and reconnection semantics for stateful commands.
 - Add explicit secret inputs and transcript redaction for authenticated probes.
 - Add a published script schema and a validation-only CLI mode.
-- Discuss a TLS upgrade operation for STARTTLS conversations.
+- Add built-in STARTTLS for XMPP, LDAP, and MySQL; scripts need binary expectations for LDAP/MySQL.
+- Discuss an `EHLO` name option for `--starttls smtp`; the argument is the local address literal.

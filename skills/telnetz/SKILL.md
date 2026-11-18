@@ -21,6 +21,7 @@ Server output goes to stdout. Status and errors go to stderr.
 | Option | Effect |
 |---|---|
 | `--tls` | TLS with webpki roots; SNI is the host name |
+| `--starttls <PROTO>` | Plaintext connect, upgrade, then TLS: `smtp`, `lmtp`, `imap`, `pop3`, `ftp`, `nntp`, `sieve`, `postgres`; accepts all TLS options; conflicts with `--tls` |
 | `--server-name <NAME>` | Override SNI and certificate verification identity; connect address stays unchanged; needs `--tls` |
 | `--insecure` | Skip certificate verification (needs `--tls`) |
 | `--no-default-ca` | Ignore bundled CAs; verified TLS trusts only `--cacert` files (needs `--tls`) |
@@ -55,6 +56,9 @@ Server output goes to stdout. Status and errors go to stderr.
 ```sh
 # Run a conversation with per-step diagnostics in script.steps
 telnetz -q --script examples/smtp.toml --json --max-time 10 localhost 25
+
+# Mail server certificate via STARTTLS; no application data sent
+telnetz -q --starttls smtp --tls-info --json --max-time 10 mail.example.com 587
 
 # Is the port open and does it speak SMTP?
 telnetz -q --expect '220' -w 5 mail.example.com 25
@@ -91,7 +95,7 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
   For protocols that reject pipelining, run one command per invocation or pace a stdin pipe
   (`{ echo A; sleep 1; echo B; } | telnetz ...`).
 - Use `--script` for wait/send sequences. Read `SCRIPTING.md` for the shared JSON/TOML schema.
-  Actions are `send_line`, `send`, `send_base64`, `expect`, `expect_eof`, `shutdown_write`, and `fail`.
+  Actions are `send_line`, `send`, `send_base64`, `expect`, `expect_eof`, `shutdown_write`, `starttls`, and `fail`.
   Expectations support `then`, `else`, `on_timeout`, and `on_eof`; global limits remain terminal.
 - `--expect` stops at the read that contains the text. Output after it is not printed.
 - `--json` captures responses as `output_base64` and nullable `output_utf8`. It suppresses status messages.
@@ -104,5 +108,9 @@ printf 'stats\r\n' | telnetz -q -w 1 --raw localhost 11211
 - Add `--no-default-ca` to exclude bundled CAs. With verification enabled and no `--cacert`, all server certificates are rejected.
 - `--dump-cert` skips trust, hostname, and expiry checks and sends no application data.
   It cannot be combined with `--cacert`, `--command`, or `--expect`.
+- `--starttls` output starts after the TLS handshake; negotiation bytes are not counted. Repeat `EHLO` for SMTP.
+  Failures exit 1 with phase `starttls` and reason `starttls_rejected`, `starttls_protocol_error`, or `starttls_unexpected_data`.
+- Script `starttls` steps upgrade other protocols. Consume the full upgrade reply first (`expect = '220 '`, then `expect = "\r\n"`);
+  unconsumed plaintext fails the step. See `examples/smtp-starttls.toml`.
 - `--insecure` skips certificate verification; it is for test servers only.
 - Interactive mode (a human at a terminal) is used only when stdin is a TTY and no `-c` is given.

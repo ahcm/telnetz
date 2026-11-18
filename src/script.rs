@@ -8,7 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{Config, DynStream, EXIT_ERROR, EXIT_EXPECT_FAILED, EXIT_LIMIT, Report};
+use crate::{Config, DynStream, EXIT_ERROR, EXIT_EXPECT_FAILED, EXIT_LIMIT, Report, Tls, starttls};
 
 const MAX_SOURCE: u64 = 1024 * 1024;
 const MAX_STEPS: usize = 4096;
@@ -46,6 +46,7 @@ struct RawStep
     expect: Option<Expectation>,
     expect_eof: Option<bool>,
     shutdown_write: Option<bool>,
+    starttls: Option<bool>,
     fail: Option<String>,
     timeout: Option<f64>,
     then: Option<Vec<RawStep>>,
@@ -75,6 +76,15 @@ struct RawCase
 pub struct Script
 {
     steps: Vec<Step>,
+    /// Some branch contains a starttls step.
+    pub starttls: bool,
+}
+
+#[derive(Default)]
+struct Stats
+{
+    steps: usize,
+    starttls: bool,
 }
 
 struct Step
@@ -94,6 +104,7 @@ enum Action
     Expect(Vec<Case>),
     ExpectEof,
     ShutdownWrite,
+    StartTls,
     Fail(String),
 }
 
@@ -107,6 +118,7 @@ impl Action
             Self::Expect(_) => "expect",
             Self::ExpectEof => "expect_eof",
             Self::ShutdownWrite => "shutdown_write",
+            Self::StartTls => "starttls",
             Self::Fail(_) => "fail",
         }
     }
@@ -156,9 +168,12 @@ pub fn parse(source: &str, path: &Path, eol: &[u8]) -> Result<Script, String>
         return Err("script steps must not be empty".into());
     }
     let default = seconds(document.step_timeout)?;
-    let mut count = 0;
-    let steps = compile(document.steps, default, eol, 0, &mut count, "steps")?;
-    Ok(Script { steps })
+    let mut stats = Stats::default();
+    let steps = compile(document.steps, default, eol, 0, &mut stats, "steps")?;
+    Ok(Script {
+        steps,
+        starttls: stats.starttls,
+    })
 }
 
 fn seconds(value: f64) -> Result<Duration, String>
@@ -174,7 +189,7 @@ fn compile(
     default: Duration,
     eol: &[u8],
     depth: usize,
-    count: &mut usize,
+    stats: &mut Stats,
     prefix: &str,
 ) -> Result<Vec<Step>, String>
 {
@@ -189,8 +204,8 @@ fn compile(
     let mut steps = Vec::new();
     for (index, raw) in raw.into_iter().enumerate()
     {
-        *count += 1;
-        if *count > MAX_STEPS
+        stats.steps += 1;
+        if stats.steps > MAX_STEPS
         {
             return Err("script exceeds 4096 steps".into());
         }
@@ -202,6 +217,7 @@ fn compile(
             raw.expect.is_some(),
             raw.expect_eof.is_some(),
             raw.shutdown_write.is_some(),
+            raw.starttls.is_some(),
             raw.fail.is_some(),
         ];
         if actions.into_iter().filter(|present| *present).count() != 1
@@ -262,7 +278,7 @@ fn compile(
                     default,
                     eol,
                     depth + 1,
-                    count,
+                    stats,
                     &format!("{path}.expect[{index}].then"),
                 )?;
                 compiled.push(Case {
@@ -288,12 +304,21 @@ fn compile(
             }
             Action::ShutdownWrite
         }
+        else if let Some(enabled) = raw.starttls
+        {
+            if !enabled
+            {
+                return Err(format!("{path}: starttls must be true"));
+            }
+            stats.starttls = true;
+            Action::StartTls
+        }
         else
         {
             Action::Fail(raw.fail.expect("validated action"))
         };
         let mut branch = |raw: Option<Vec<RawStep>>, label: &str| {
-            raw.map(|raw| compile(raw, default, eol, depth + 1, count, &format!("{path}.{label}")))
+            raw.map(|raw| compile(raw, default, eol, depth + 1, stats, &format!("{path}.{label}")))
                 .transpose()
         };
         let then = branch(raw.then, "then")?.unwrap_or_default();
@@ -318,12 +343,15 @@ pub async fn run(
     stream: &mut DynStream,
     config: &Config,
     report: &mut Report,
+    tls: Option<&Tls>,
 ) -> Result<u8, Box<dyn Error>>
 {
     let mut runner = Runner {
         stream,
         config,
         report,
+        tls,
+        upgraded: false,
         pending: Vec::new(),
         pending_start: 0,
         eof: false,
@@ -348,6 +376,8 @@ struct Runner<'a>
     stream: &'a mut DynStream,
     config: &'a Config,
     report: &'a mut Report,
+    tls: Option<&'a Tls>,
+    upgraded: bool,
     pending: Vec<u8>,
     pending_start: u64,
     eof: bool,
@@ -452,6 +482,42 @@ impl Runner<'_>
         Ok(None)
     }
 
+    /// Unconsumed plaintext is rejected, not carried into the TLS session.
+    async fn upgrade(&mut self) -> Result<Event, Box<dyn Error>>
+    {
+        self.report.phase = "starttls";
+        let tls = self
+            .tls
+            .expect("TLS is prepared for scripts with starttls steps");
+        let problem = if self.upgraded
+        {
+            Some(("starttls_error", "TLS is already active".to_owned()))
+        }
+        else if self.write_closed || self.eof
+        {
+            Some(("starttls_error", "connection is half-closed".to_owned()))
+        }
+        else if !self.pending.is_empty()
+        {
+            Some((
+                "starttls_unexpected_data",
+                format!("{} unconsumed plaintext bytes before the TLS upgrade", self.pending.len()),
+            ))
+        }
+        else
+        {
+            None
+        };
+        if let Some((reason, message)) = problem
+        {
+            return Err(starttls::Error::new(reason, message).into());
+        }
+        let plain = std::mem::replace(self.stream, Box::new(tokio::io::empty()));
+        *self.stream = Box::new(tls.handshake(plain, self.config, self.report).await?);
+        self.upgraded = true;
+        Ok(Event::Done("tls_upgraded"))
+    }
+
     async fn perform(&mut self, action: &Action) -> Result<Event, Box<dyn Error>>
     {
         match action
@@ -488,6 +554,7 @@ impl Runner<'_>
                 self.write_closed = true;
                 return Ok(Event::Done("write_shutdown"));
             }
+            Action::StartTls => return self.upgrade().await,
             Action::Fail(_) => unreachable!("fail is handled before I/O"),
             _ =>
             {}

@@ -42,6 +42,7 @@ Each step has exactly one action:
 | `expect` | Nonempty string or case array | Wait for a literal UTF-8 byte sequence |
 | `expect_eof` | `true` | Read until the peer closes its sending side |
 | `shutdown_write` | `true` | Close the sending side and continue the script |
+| `starttls` | `true` | Upgrade the connection to TLS |
 | `fail` | String | Stop with exit 3 and this diagnostic |
 
 An expectation step can also contain `then`, `else`, `on_timeout`, and `on_eof`.
@@ -88,6 +89,32 @@ For `expect_eof`, EOF is success; only timeout requires recovery.
 Receiving bytes that do not yet match does not run `else`. Known negative replies
 belong in explicit cases. Transport errors, send/output timeouts, and hard limits
 terminate execution. They do not run expectation failure handlers.
+
+## STARTTLS
+
+The script sends the upgrade command and consumes the complete reply. A `starttls`
+step then performs the TLS handshake on the open connection.
+
+```sh
+telnetz mail.example.com 587 --script examples/smtp-starttls.toml --json --max-time 10
+```
+
+Unconsumed plaintext in the matching buffer fails the step with exit 1 and reason
+`starttls_unexpected_data`. Expect each reply through its line ending, e.g.
+`expect = '220 '` followed by `expect = "\r\n"`. Pre-TLS bytes are never matched
+by later expectations.
+
+`--server-name`, `--cacert`, `--no-default-ca`, and `--insecure` configure the
+upgrade. A script without a `starttls` step rejects them unless `--tls` or
+`--starttls` is given. A `starttls` step conflicts with `--tls` and `--starttls`.
+A second upgrade on one connection fails at run time.
+
+The step timeout covers the handshake. Handshake and certificate errors are
+terminal and exit 1. Output and byte counts include application bytes before and
+after the upgrade. The trace entry has action `starttls` and reason `tls_upgraded`.
+JSON `tls` describes the upgraded connection.
+
+With `--starttls <proto>`, telnetz negotiates the upgrade before the first step.
 
 ## Limits and diagnostics
 

@@ -1,0 +1,55 @@
+version = 1
+step_timeout = 5
+
+# Each reply is consumed through CRLF; starttls rejects unconsumed plaintext.
+[[steps]]
+name = 'greeting'
+expect = '220 '
+else = [{ fail = 'No SMTP greeting' }]
+
+[[steps]]
+expect = "\r\n"
+
+[[steps]]
+send_line = 'EHLO agent.example'
+
+[[steps]]
+name = 'capabilities'
+expect = '250 '
+
+[[steps]]
+expect = "\r\n"
+
+[[steps]]
+send_line = 'STARTTLS'
+
+[[steps]]
+name = 'starttls-reply'
+expect = [
+  { text = '220 ' },
+  { text = '454 ', then = [{ fail = 'TLS not available' }] },
+]
+else = [{ fail = 'STARTTLS rejected' }]
+
+[[steps]]
+expect = "\r\n"
+
+[[steps]]
+starttls = true
+
+# RFC 3207: pre-TLS capabilities are discarded; EHLO is repeated.
+[[steps]]
+send_line = 'EHLO agent.example'
+
+[[steps]]
+name = 'tls-capabilities'
+expect = '250 '
+
+[[steps]]
+expect = "\r\n"
+
+[[steps]]
+send_line = 'QUIT'
+
+[[steps]]
+expect = '221 '

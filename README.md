@@ -69,7 +69,7 @@ telnetz localhost 443 --tls --cacert server.crt
 `--cacert` accepts PEM certificates, PEM bundles, or a DER certificate. Repeat it
 to trust multiple files. These certificates are added to the built-in public
 roots for this invocation. Hostname and expiry checks still apply; the host must
-match the certificate's subject alternative name. `--cacert` requires `--tls`
+match the certificate's subject alternative name. `--cacert` requires `--tls` or `--starttls`
 and cannot be combined with `--insecure`.
 
 Some devices use a certificate marked `CA:TRUE` as their TLS server certificate.
@@ -91,16 +91,16 @@ Use `--no-default-ca` to trust only certificates supplied with `--cacert`:
 telnetz localhost 443 --tls --no-default-ca --cacert server.crt
 ```
 
-This option requires `--tls`. Certificate verification remains enabled; without
+This option requires `--tls` or `--starttls`. Certificate verification remains enabled; without
 any `--cacert` files, no server certificate is trusted.
 
 `--dump-cert` saves the server's leaf certificate as PEM and exits without reading
 stdin or sending application data. It fetches certificates without checking trust,
-hostname, or expiry. It requires `--tls` and cannot be combined with `--cacert`,
+hostname, or expiry. It requires `--tls` or `--starttls` and cannot be combined with `--cacert`,
 `--command`, or `--expect`. Existing files are preserved. Use `--dump-cert -` to
 write PEM to stdout.
 
-Use `--server-name <name>` with `--tls` to set both SNI and the certificate
+Use `--server-name <name>` with `--tls` or `--starttls` to set both SNI and the certificate
 verification identity while connecting to a different address:
 
 ```sh
@@ -124,8 +124,45 @@ telnetz localhost 8443 --tls --cacert server.crt --tls-info --json --max-time 3
 ```
 
 For an untrusted or expired server, explicitly use `--insecure` to inspect it;
-the result reports `verification: "skipped"`. `--tls-info` requires `--tls` and
+the result reports `verification: "skipped"`. `--tls-info` requires `--tls` or `--starttls` and
 cannot be combined with `--dump-cert`, `--command`, or `--expect`.
+
+## STARTTLS
+
+`--starttls <proto>` connects in plaintext, negotiates the upgrade, then performs
+the TLS handshake. Commands, stdin, `--expect`, and scripts start after the handshake.
+
+```sh
+telnetz mail.example.com 587 --starttls smtp --tls-info --json --max-time 10
+telnetz mail.example.com 587 --starttls smtp -c 'EHLO client.example' --expect '250 ' -w 5
+```
+
+| Protocol | Exchange before the handshake |
+|---|---|
+| `smtp`, `lmtp` | greeting `220`; `EHLO`/`LHLO [local-address]` → `250`; `STARTTLS` → `220` |
+| `imap` | greeting `* OK`; `a1 STARTTLS` → `a1 OK` |
+| `pop3` | greeting `+OK`; `STLS` → `+OK` |
+| `ftp` | greeting `220`; `AUTH TLS` → `234` (control connection only) |
+| `nntp` | greeting `200` or `201`; `STARTTLS` → `382` |
+| `sieve` | greeting `OK`; `STARTTLS` → `OK` (RFC 5804) |
+| `postgres` | SSLRequest → `S` |
+
+All TLS options apply, including `--dump-cert` and `--tls-info`. `--starttls`
+conflicts with `--tls`. Negotiation bytes are neither printed nor counted in
+`bytes_sent`, `bytes_received`, or `--max-bytes`. Negotiation is limited to 64 KiB
+and to `--connect-timeout`. SMTP and LMTP sessions must repeat `EHLO`/`LHLO` after
+the handshake (RFC 3207).
+
+Failures exit 1 in phase `starttls`:
+
+| Reason | Condition |
+|---|---|
+| `starttls_rejected` | Negative or unexpected reply; quoted in `error` |
+| `starttls_protocol_error` | Malformed reply, EOF, or 64 KiB exceeded |
+| `starttls_unexpected_data` | Plaintext after the final reply (response injection) |
+
+Certificate and handshake failures report phase `tls`, as with `--tls`. For other
+protocols, use a script `starttls` step; see [SCRIPTING.md](SCRIPTING.md#starttls).
 
 `--shutdown-write` closes the sending side after all `-c` commands or piped input
 have been sent, including empty stdin. It continues receiving replies until EOF,

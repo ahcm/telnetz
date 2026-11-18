@@ -14,9 +14,11 @@ use tokio_rustls::TlsConnector;
 
 mod report;
 mod script;
+mod starttls;
 mod tls_info;
 mod verify;
 use report::Report;
+use starttls::Protocol;
 
 trait StreamLike: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> StreamLike for T {}
@@ -33,6 +35,7 @@ struct Config
     host: String,
     port: u16,
     tls: bool,
+    starttls: Option<Protocol>,
     server_name: Option<String>,
     insecure: bool,
     no_default_ca: bool,
@@ -60,6 +63,8 @@ fn print_usage()
          \n\
          Options:\n\
            --tls                  Use TLS for the connection.\n\
+           --starttls <PROTO>     Upgrade to TLS via PROTO: smtp, lmtp, imap,\n\
+                                  pop3, ftp, nntp, sieve, or postgres.\n\
            --server-name <NAME>   Override TLS SNI and certificate hostname.\n\
            --insecure             Skip certificate validation (TLS only).\n\
            --no-default-ca        Ignore bundled CA certificates (TLS only).\n\
@@ -73,7 +78,7 @@ fn print_usage()
            --expect <TEXT>        Exit 0 as soon as TEXT appears in the output,\n\
                                   exit 3 if the connection ends without it.\n\
            -w, --timeout <SECS>   Exit after SECS without traffic.\n\
-           --connect-timeout <SECS>  Connect/handshake timeout (default 10).\n\
+           --connect-timeout <SECS>  Connect/STARTTLS/handshake timeout (default 10).\n\
            --max-time <SECS>      Limit total connection/session time.\n\
            --max-bytes <BYTES>    Limit received application bytes (positive).\n\
            --lf                   Terminate lines with LF instead of CRLF.\n\
@@ -106,6 +111,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut tls = false;
+    let mut starttls = None;
     let mut server_name = None;
     let mut insecure = false;
     let mut no_default_ca = false;
@@ -135,6 +141,13 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
         match arg.as_str()
         {
             "--tls" => tls = true,
+            "--starttls" =>
+            {
+                let name = value(&arg)?;
+                starttls = Some(Protocol::parse(&name).ok_or_else(|| {
+                    format!("--starttls: unknown protocol '{name}'; use {}", Protocol::NAMES)
+                })?);
+            }
             "--server-name" => server_name = Some(value(&arg)?),
             "--insecure" => insecure = true,
             "--no-default-ca" => no_default_ca = true,
@@ -202,11 +215,18 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
     {
         return Err("--script cannot be used with --command, --expect, --dump-cert, --tls-info, --raw, or --shutdown-write".into());
     }
+    if tls && starttls.is_some()
+    {
+        return Err("--starttls cannot be used with --tls".into());
+    }
+    let tls = tls || starttls.is_some();
+    // A script starttls step also permits TLS options; checked after parsing the script.
+    let tls_options = tls || script.is_some();
     if tls_info
     {
         if !tls
         {
-            return Err("--tls-info requires --tls".into());
+            return Err("--tls-info requires --tls or --starttls".into());
         }
         if dump_cert.is_some() || !commands.is_empty() || expect.is_some()
         {
@@ -215,26 +235,26 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
     }
     if let Some(name) = &server_name
     {
-        if !tls
+        if !tls_options
         {
-            return Err("--server-name requires --tls".into());
+            return Err("--server-name requires --tls or --starttls".into());
         }
         rustls::pki_types::ServerName::try_from(name.as_str())
             .map_err(|_| "--server-name requires a valid DNS name or IP address")?;
     }
-    if insecure && !tls
+    if insecure && !tls_options
     {
-        return Err("--insecure requires --tls".into());
+        return Err("--insecure requires --tls or --starttls".into());
     }
-    if no_default_ca && !tls
+    if no_default_ca && !tls_options
     {
-        return Err("--no-default-ca requires --tls".into());
+        return Err("--no-default-ca requires --tls or --starttls".into());
     }
     if !ca_certs.is_empty()
     {
-        if !tls
+        if !tls_options
         {
-            return Err("--cacert requires --tls".into());
+            return Err("--cacert requires --tls or --starttls".into());
         }
         if insecure
         {
@@ -245,7 +265,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
     {
         if !tls
         {
-            return Err("--dump-cert requires --tls".into());
+            return Err("--dump-cert requires --tls or --starttls".into());
         }
         if !ca_certs.is_empty() || !commands.is_empty() || expect.is_some()
         {
@@ -266,6 +286,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
         host,
         port,
         tls,
+        starttls,
         server_name,
         insecure,
         no_default_ca,
@@ -311,10 +332,52 @@ async fn load_ca_certificates(
     Ok(certs)
 }
 
-async fn connect_tls(
-    config: &Config,
-    report: &mut Report,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error>>
+impl Config
+{
+    /// First TLS-only option given, for usage errors in script mode.
+    fn tls_option(&self) -> Option<&'static str>
+    {
+        [
+            (self.server_name.is_some(), "--server-name"),
+            (self.insecure, "--insecure"),
+            (self.no_default_ca, "--no-default-ca"),
+            (!self.ca_certs.is_empty(), "--cacert"),
+        ]
+        .into_iter()
+        .find_map(|(given, option)| given.then_some(option))
+    }
+}
+
+/// Client configuration and verification identity, prepared before connecting.
+struct Tls
+{
+    connector: TlsConnector,
+    server_name: rustls::pki_types::ServerName<'static>,
+}
+
+impl Tls
+{
+    async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        io: IO,
+        config: &Config,
+        report: &mut Report,
+    ) -> Result<tokio_rustls::client::TlsStream<IO>, Box<dyn Error>>
+    {
+        report.phase = "tls";
+        let stream = self.connector.connect(self.server_name.clone(), io).await?;
+        if config.json || config.tls_info
+        {
+            report.tls = Some(tls_info::inspect(
+                stream.get_ref().1,
+                !config.insecure && config.dump_cert.is_none(),
+            ));
+        }
+        Ok(stream)
+    }
+}
+
+async fn prepare_tls(config: &Config, report: &mut Report) -> Result<Tls, Box<dyn Error>>
 {
     report.phase = "certificate";
     let client_config = if config.insecure || config.dump_cert.is_some()
@@ -353,22 +416,30 @@ async fn connect_tls(
         }
     };
 
-    let connector = TlsConnector::from(std::sync::Arc::new(client_config));
-    let effective_name = config.server_name.as_ref().unwrap_or(&config.host);
-    report.server_name = Some(effective_name.clone());
-    let server_name = rustls::pki_types::ServerName::try_from(effective_name.clone())
-        .map_err(|_| "Invalid DNS name for TLS")?;
-    let stream = connect_tcp(config, report).await?;
-    report.phase = "tls";
-    let stream = connector.connect(server_name, stream).await?;
-    if config.json || config.tls_info
+    let name = config.server_name.as_ref().unwrap_or(&config.host).clone();
+    report.server_name = Some(name.clone());
+    let server_name =
+        rustls::pki_types::ServerName::try_from(name).map_err(|_| "Invalid DNS name for TLS")?;
+    Ok(Tls {
+        connector: TlsConnector::from(std::sync::Arc::new(client_config)),
+        server_name,
+    })
+}
+
+async fn connect_tls(
+    config: &Config,
+    report: &mut Report,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error>>
+{
+    let tls = prepare_tls(config, report).await?;
+    let mut stream = connect_tcp(config, report).await?;
+    if let Some(protocol) = config.starttls
     {
-        report.tls = Some(tls_info::inspect(
-            stream.get_ref().1,
-            !config.insecure && config.dump_cert.is_none(),
-        ));
+        report.phase = "starttls";
+        let local = stream.local_addr()?;
+        starttls::negotiate(protocol, &mut stream, local).await?;
     }
-    Ok(stream)
+    tls.handshake(stream, config, report).await
 }
 
 async fn connect_tcp(config: &Config, report: &mut Report) -> Result<TcpStream, Box<dyn Error>>
@@ -651,6 +722,16 @@ impl Matcher
     }
 }
 
+fn usage_error(config: &Config, report: &mut Report, message: &str) -> Result<u8, Box<dyn Error>>
+{
+    report.error = Some(message.to_owned());
+    if !config.json
+    {
+        eprintln!("Error: {message}");
+    }
+    Ok(report.finish(EXIT_USAGE, "invalid_arguments"))
+}
+
 async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
 {
     if config.tls_info
@@ -686,6 +767,34 @@ async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
     {
         None
     };
+    let upgrade = match &script
+    {
+        Some(script) if script.starttls =>
+        {
+            if config.tls
+            {
+                return usage_error(
+                    config,
+                    report,
+                    "script starttls steps cannot be used with --tls or --starttls",
+                );
+            }
+            Some(prepare_tls(config, report).await?)
+        }
+        Some(_) if !config.tls =>
+        {
+            if let Some(option) = config.tls_option()
+            {
+                return usage_error(
+                    config,
+                    report,
+                    &format!("{option} requires --tls, --starttls, or a script starttls step"),
+                );
+            }
+            None
+        }
+        _ => None,
+    };
     let mut stream = tokio::time::timeout(config.connect_timeout, connect(config, report))
         .await
         .map_err(|_| {
@@ -693,7 +802,7 @@ async fn run(config: &Config, report: &mut Report) -> Result<u8, Box<dyn Error>>
         })??;
     if let Some(script) = &script
     {
-        return script::run(script, &mut stream, config, report).await;
+        return script::run(script, &mut stream, config, report, upgrade.as_ref()).await;
     }
     let (read_half, mut write_half) = io::split(stream);
     let mut socket_reader = io::BufReader::new(read_half);
@@ -851,6 +960,7 @@ fn json_requested(arguments: &[String]) -> bool
                 | "--max-time"
                 | "--max-bytes"
                 | "--server-name"
+                | "--starttls"
                 | "--script"
         )
         {
