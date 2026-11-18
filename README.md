@@ -139,13 +139,18 @@ telnetz mail.example.com 587 --starttls smtp -c 'EHLO client.example' --expect '
 
 | Protocol | Exchange before the handshake |
 |---|---|
-| `smtp`, `lmtp` | greeting `220`; `EHLO`/`LHLO [local-address]` → `250`; `STARTTLS` → `220` |
+| `smtp`, `lmtp` | greeting `220`; `EHLO`/`LHLO <name>` → `250`; `STARTTLS` → `220` |
 | `imap` | greeting `* OK`; `a1 STARTTLS` → `a1 OK` |
 | `pop3` | greeting `+OK`; `STLS` → `+OK` |
 | `ftp` | greeting `220`; `AUTH TLS` → `234` (control connection only) |
 | `nntp` | greeting `200` or `201`; `STARTTLS` → `382` |
 | `sieve` | greeting `OK`; `STARTTLS` → `OK` (RFC 5804) |
 | `postgres` | SSLRequest → `S` |
+
+`--ehlo <name>` sets the `EHLO`/`LHLO` argument: a domain or an address literal
+such as `[192.0.2.1]`. It accepts 1 to 255 printable ASCII characters without
+spaces. The default is the local address literal (RFC 5321 section 4.1.3), which
+discloses the client's local IP address to the server.
 
 All TLS options apply, including `--dump-cert` and `--tls-info`. `--starttls`
 conflicts with `--tls`. Negotiation bytes are neither printed nor counted in

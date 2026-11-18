@@ -110,7 +110,7 @@ fn starts_with_ignore_case(line: &[u8], prefix: &[u8]) -> bool
 }
 
 /// RFC 5321 section 4.1.3 address literal.
-fn address_literal(address: SocketAddr) -> String
+pub fn address_literal(address: SocketAddr) -> String
 {
     match address
     {
@@ -225,7 +225,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<'_, S>
 pub async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     protocol: Protocol,
     stream: &mut S,
-    local: SocketAddr,
+    hello_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>>
 {
     let mut session = Session {
@@ -246,7 +246,7 @@ pub async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
             };
             session.reply("greeting", &[b"220"]).await?;
             session
-                .send(format!("{hello} {}\r\n", address_literal(local)).as_bytes())
+                .send(format!("{hello} {hello_name}\r\n").as_bytes())
                 .await?;
             session.reply(hello, &[b"250"]).await?;
             session.send(b"STARTTLS\r\n").await?;

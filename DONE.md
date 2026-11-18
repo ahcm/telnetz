@@ -1,6 +1,7 @@
 # Completed
 
 - Added `--starttls` negotiation for SMTP, LMTP, IMAP, POP3, FTP, NNTP, ManageSieve, and PostgreSQL.
+- Added `--ehlo` for the SMTP/LMTP STARTTLS greeting name; default is the local address literal.
 - Added a script `starttls` step; unconsumed plaintext before the upgrade is rejected.
 
 - Added direct trust for an exactly imported CA-marked server certificate while retaining identity, validity, purpose, and TLS signature checks.

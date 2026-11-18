@@ -36,6 +36,7 @@ struct Config
     port: u16,
     tls: bool,
     starttls: Option<Protocol>,
+    ehlo: Option<String>,
     server_name: Option<String>,
     insecure: bool,
     no_default_ca: bool,
@@ -65,6 +66,8 @@ fn print_usage()
            --tls                  Use TLS for the connection.\n\
            --starttls <PROTO>     Upgrade to TLS via PROTO: smtp, lmtp, imap,\n\
                                   pop3, ftp, nntp, sieve, or postgres.\n\
+           --ehlo <NAME>          EHLO/LHLO argument for --starttls smtp/lmtp\n\
+                                  (default: local address literal).\n\
            --server-name <NAME>   Override TLS SNI and certificate hostname.\n\
            --insecure             Skip certificate validation (TLS only).\n\
            --no-default-ca        Ignore bundled CA certificates (TLS only).\n\
@@ -112,6 +115,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
     let mut port: Option<u16> = None;
     let mut tls = false;
     let mut starttls = None;
+    let mut ehlo = None;
     let mut server_name = None;
     let mut insecure = false;
     let mut no_default_ca = false;
@@ -148,6 +152,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
                     format!("--starttls: unknown protocol '{name}'; use {}", Protocol::NAMES)
                 })?);
             }
+            "--ehlo" => ehlo = Some(value(&arg)?),
             "--server-name" => server_name = Some(value(&arg)?),
             "--insecure" => insecure = true,
             "--no-default-ca" => no_default_ca = true,
@@ -219,6 +224,18 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
     {
         return Err("--starttls cannot be used with --tls".into());
     }
+    if let Some(name) = &ehlo
+    {
+        if !matches!(starttls, Some(Protocol::Smtp | Protocol::Lmtp))
+        {
+            return Err("--ehlo requires --starttls smtp or lmtp".into());
+        }
+        // Printable ASCII without spaces; excludes CR/LF command injection.
+        if name.is_empty() || name.len() > 255 || !name.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err("--ehlo requires 1 to 255 printable ASCII characters without spaces".into());
+        }
+    }
     let tls = tls || starttls.is_some();
     // A script starttls step also permits TLS options; checked after parsing the script.
     let tls_options = tls || script.is_some();
@@ -287,6 +304,7 @@ fn parse_args(arguments: &[String]) -> Result<Config, Box<dyn Error>>
         port,
         tls,
         starttls,
+        ehlo,
         server_name,
         insecure,
         no_default_ca,
@@ -436,8 +454,12 @@ async fn connect_tls(
     if let Some(protocol) = config.starttls
     {
         report.phase = "starttls";
-        let local = stream.local_addr()?;
-        starttls::negotiate(protocol, &mut stream, local).await?;
+        let hello_name = match &config.ehlo
+        {
+            Some(name) => name.clone(),
+            None => starttls::address_literal(stream.local_addr()?),
+        };
+        starttls::negotiate(protocol, &mut stream, &hello_name).await?;
     }
     tls.handshake(stream, config, report).await
 }
@@ -961,6 +983,7 @@ fn json_requested(arguments: &[String]) -> bool
                 | "--max-bytes"
                 | "--server-name"
                 | "--starttls"
+                | "--ehlo"
                 | "--script"
         )
         {

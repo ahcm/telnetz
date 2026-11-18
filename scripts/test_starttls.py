@@ -139,6 +139,19 @@ class StartTlsTests(Fixture):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(received.get(timeout=1), b"EHLO client\r\n")
 
+    def test_ehlo_name(self):
+        for protocol, name, line in (
+            ("smtp", "client.example", b"EHLO client.example\r\n"),
+            ("lmtp", "[192.0.2.1]", b"LHLO [192.0.2.1]\r\n"),
+        ):
+            with self.subTest(protocol=protocol):
+                steps = list(EXCHANGES[protocol])
+                steps[1] = line
+                with starttls_server(self.cert, self.key, steps) as port:
+                    result = self.client(port, "--starttls", protocol, "--ehlo", name, "--expect", "ready")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, b"ready\r\n")
+
     def test_rejections(self):
         cases = {
             "smtp": (EXCHANGES["smtp"][:4] + [b"454 4.7.0 TLS not available\r\n"], "454 4.7.0"),
@@ -212,6 +225,13 @@ class StartTlsTests(Fixture):
             (("--starttls", "smtp", "--tls"), b"--starttls cannot be used with --tls"),
             (("--starttls", "xmpp"), b"unknown protocol 'xmpp'"),
             (("--starttls",), b"--starttls requires a value"),
+            (("--ehlo", "client.example"), b"--ehlo requires --starttls smtp or lmtp"),
+            (("--starttls", "imap", "--ehlo", "client.example"), b"--ehlo requires --starttls smtp or lmtp"),
+            (("--starttls", "smtp", "--ehlo"), b"--ehlo requires a value"),
+            (("--starttls", "smtp", "--ehlo", ""), b"--ehlo requires 1 to 255"),
+            (("--starttls", "smtp", "--ehlo", "a b"), b"--ehlo requires 1 to 255"),
+            (("--starttls", "smtp", "--ehlo", "a\r\nRSET"), b"--ehlo requires 1 to 255"),
+            (("--starttls", "smtp", "--ehlo", "x" * 256), b"--ehlo requires 1 to 255"),
         ):
             with self.subTest(options=options):
                 result = subprocess.run([str(BINARY), "127.0.0.1", "1", *options], capture_output=True, timeout=5)

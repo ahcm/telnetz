@@ -22,6 +22,7 @@ Server output goes to stdout. Status and errors go to stderr.
 |---|---|
 | `--tls` | TLS with webpki roots; SNI is the host name |
 | `--starttls <PROTO>` | Plaintext connect, upgrade, then TLS: `smtp`, `lmtp`, `imap`, `pop3`, `ftp`, `nntp`, `sieve`, `postgres`; accepts all TLS options; conflicts with `--tls` |
+| `--ehlo <NAME>` | `EHLO`/`LHLO` argument for `--starttls smtp`/`lmtp`; default is the local address literal |
 | `--server-name <NAME>` | Override SNI and certificate verification identity; connect address stays unchanged; needs `--tls` |
 | `--insecure` | Skip certificate verification (needs `--tls`) |
 | `--no-default-ca` | Ignore bundled CAs; verified TLS trusts only `--cacert` files (needs `--tls`) |
